@@ -1,0 +1,19 @@
+#!/bin/sh
+# ElevenDE session entry point.
+# Started by the display manager (GDM/SDDM/LightDM) via elevende.desktop,
+# or manually from a TTY:  exec elevende-session
+
+export XDG_CURRENT_DESKTOP=ElevenDE
+export XDG_SESSION_TYPE=wayland
+
+# XDG dirs (freedesktop compatibility)
+: "${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"
+export XDG_RUNTIME_DIR
+
+# GTK/Qt theming hints so native apps blend in
+export GTK_THEME=Adwaita
+export QT_QPA_PLATFORMTHEME=qt5ct
+
+SHELL_DIR=/usr/local/share/elevende/shell
+
+exec /usr/local/bin/elevende -s "python3 $SHELL_DIR/shell.py"

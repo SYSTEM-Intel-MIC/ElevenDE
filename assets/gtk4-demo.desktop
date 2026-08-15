@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=GTK4 演示
+Comment=GTK 4 widget gallery
+Exec=gtk4-demo
+Icon=gtk4-demo
+Terminal=false
+Categories=Development;GTK;

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=终端 (XTerm)
+Comment=X11 terminal emulator (via XWayland)
+Exec=xterm -fa Monospace -fs 11
+Icon=utilities-terminal-symbolic
+Terminal=false
+Categories=System;TerminalEmulator;
+StartupWMClass=XTerm
