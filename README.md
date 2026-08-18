@@ -5,12 +5,8 @@ Qt6/GTK 应用套件，在视觉与交互上对齐 Windows 11，同时完整保�
 面向 Debian 系所有发行版（Debian / Ubuntu / Kali / Mint / Pop!_OS …），
 一键安装后即可作为日常桌面使用。
 
-![ElevenDE 3.4](docs/ElevenDE%203.3桌面.png)
+![ElevenDE 3.4](docs/ElevenDE.png)
 
-| | |
-|---|---|
-| ![桌面](docs/桌面截图.png) | ![开始菜单](docs/开始菜单截图.png) |
-| *桌面 + 顶部任务栏* | *开始菜单（左对齐图标组）* |
 
 > **状态：M3.5.1 图标与命名完善版本**。核心桌面、内置应用套件、快捷键管理、SAS 安全选项屏幕、WLAN 面板及 **Lindows 资源管理器**均可用。
 
@@ -35,6 +31,7 @@ Qt6/GTK 应用套件，在视觉与交互上对齐 Windows 11，同时完整保�
 chmod +x build-deb.sh
 sudo ./build-deb.sh
 sudo apt install ./elevende_3.5.1_amd64.deb
+sudo -i  elevende-setup-autologin
 ```
 
 > **升级说明**：现有用户无需删除配置。安装 3.5.1 后重新登录 ElevenDE，即会使用新的图标主题、任务栏解析逻辑和资源管理器命名。
