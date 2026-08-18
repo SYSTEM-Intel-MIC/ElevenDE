@@ -1,11 +1,11 @@
-# ElevenDE 3.4
+# ElevenDE 3.5.1正式发布
 
 **Windows 11 风格的 Linux X11 桌面环境** —— 自研 C/Xlib 桌面 Shell + Openbox 窗口管理器 +
 Qt6/GTK 应用套件，在视觉与交互上对齐 Windows 11，同时完整保留 Linux 生态兼容性。
 面向 Debian 系所有发行版（Debian / Ubuntu / Kali / Mint / Pop!_OS …），
 一键安装后即可作为日常桌面使用。
 
-![ElevenDE 3.4](docs/ElevenDE.png)
+![ElevenDE 3.5.1](docs/ElevenDE.png)
 
 
 > **状态：M3.5.1 图标与命名完善版本**。核心桌面、内置应用套件、快捷键管理、SAS 安全选项屏幕、WLAN 面板及 **Lindows 资源管理器**均可用。
