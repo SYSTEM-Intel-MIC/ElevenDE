@@ -1,0 +1,17 @@
+[Desktop Entry]
+Name=SAS Screen
+Name[zh_CN]=安全选项屏幕
+Comment=Bind Ctrl+Alt+Delete to the SAS screen
+Icon=utilities-system-monitor
+Type=Service
+X-KDE-ServiceTypes=KWin/Script
+X-Plasma-API=javascript
+X-Plasma-MainScript=code/main.js
+X-KDE-PluginInfo-Author=sas-screen
+X-KDE-PluginInfo-Email=sas-screen@example.com
+X-KDE-PluginInfo-Name=sas-screen
+X-KDE-PluginInfo-Version=1.0
+X-KDE-PluginInfo-License=GPL-2.0+
+X-KDE-PluginInfo-Category=Window Management
+X-KDE-PluginInfo-DependsOn=
+X-KDE-PluginInfo-EnabledByDefault=false

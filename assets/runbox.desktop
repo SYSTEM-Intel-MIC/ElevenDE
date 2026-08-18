@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=运行
+Name[en]=Run
+Comment=Windows style Run dialog (Win+R)
+Exec=runbox
+Icon=system-run
+Terminal=false
+Categories=System;Utility;
+NoDisplay=true
+StartupWMClass=runbox

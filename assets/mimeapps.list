@@ -1,0 +1,70 @@
+# ElevenDE default application associations.
+# Installed to /usr/share/applications/mimeapps.list (system) and merged into
+# each user's ~/.config/mimeapps.list at install time. Values are an ordered
+# fallback chain: the first .desktop that is actually installed wins, so this
+# works on minimal Debian systems too.
+
+[Default Applications]
+# --- text / documents ---
+text/plain=elevende-notepad.desktop;org.gnome.gedit.desktop;kdeorg-kate.desktop;mousepad.desktop;
+text/markdown=elevende-notepad.desktop;
+text/x-csrc=elevende-notepad.desktop;
+text/x-chdr=elevende-notepad.desktop;
+text/x-c++src=elevende-notepad.desktop;
+text/x-python=elevende-notepad.desktop;
+text/x-shellscript=elevende-notepad.desktop;
+text/x-log=elevende-notepad.desktop;
+application/json=elevende-notepad.desktop;
+application/xml=elevende-notepad.desktop;
+application/x-wine-extension-ini=elevende-notepad.desktop;
+
+# --- images -> ElevenDE Photos ---
+image/png=elevende-photos.desktop;org.gnome.eog.desktop;
+image/jpeg=elevende-photos.desktop;org.gnome.eog.desktop;
+image/bmp=elevende-photos.desktop;org.gnome.eog.desktop;
+image/gif=elevende-photos.desktop;org.gnome.eog.desktop;
+image/webp=elevende-photos.desktop;org.gnome.eog.desktop;
+image/svg+xml=elevende-photos.desktop;org.gnome.eog.desktop;
+image/tiff=elevende-photos.desktop;org.gnome.eog.desktop;
+image/vnd.microsoft.icon=elevende-photos.desktop;
+
+# --- archives -> archive manager (NOT the file manager) ---
+application/zip=org.gnome.FileRoller.desktop;org.kde.ark.desktop;xarchiver.desktop;
+application/x-7z-compressed=org.gnome.FileRoller.desktop;org.kde.ark.desktop;xarchiver.desktop;
+application/x-rar=org.gnome.FileRoller.desktop;org.kde.ark.desktop;xarchiver.desktop;
+application/x-rar-compressed=org.gnome.FileRoller.desktop;org.kde.ark.desktop;xarchiver.desktop;
+application/x-tar=org.gnome.FileRoller.desktop;org.kde.ark.desktop;xarchiver.desktop;
+application/x-compressed-tar=org.gnome.FileRoller.desktop;org.kde.ark.desktop;xarchiver.desktop;
+application/gzip=org.gnome.FileRoller.desktop;org.kde.ark.desktop;xarchiver.desktop;
+application/x-bzip2=org.gnome.FileRoller.desktop;org.kde.ark.desktop;xarchiver.desktop;
+application/x-xz=org.gnome.FileRoller.desktop;org.kde.ark.desktop;xarchiver.desktop;
+application/vnd.debian.binary-package=org.gnome.FileRoller.desktop;xarchiver.desktop;
+application/x-ms-dos-executable=org.gnome.FileRoller.desktop;xarchiver.desktop;
+
+# --- directories -> file manager ---
+inode/directory=explorer.desktop;org.gnome.Nautilus.desktop;
+
+# --- media ---
+video/mp4=org.gnome.Totem.desktop;vlc.desktop;mpv.desktop;
+video/x-matroska=org.gnome.Totem.desktop;vlc.desktop;mpv.desktop;
+video/webm=org.gnome.Totem.desktop;vlc.desktop;mpv.desktop;
+video/x-msvideo=org.gnome.Totem.desktop;vlc.desktop;mpv.desktop;
+audio/mpeg=org.gnome.Totem.desktop;vlc.desktop;audacious.desktop;
+audio/flac=org.gnome.Totem.desktop;vlc.desktop;audacious.desktop;
+audio/wav=org.gnome.Totem.desktop;vlc.desktop;audacious.desktop;
+audio/ogg=org.gnome.Totem.desktop;vlc.desktop;audacious.desktop;
+
+# --- pdf / office ---
+application/pdf=org.gnome.Evince.desktop;org.kde.okular.desktop;
+application/msword=libreoffice-writer.desktop;org.gnome.gedit.desktop;
+application/vnd.openxmlformats-officedocument.wordprocessingml.document=libreoffice-writer.desktop;
+application/vnd.ms-excel=libreoffice-calc.desktop;
+application/vnd.openxmlformats-officedocument.spreadsheetml.sheet=libreoffice-calc.desktop;
+application/vnd.ms-powerpoint=libreoffice-impress.desktop;
+application/vnd.openxmlformats-officedocument.presentationml.presentation=libreoffice-impress.desktop;
+
+# --- web ---
+text/html=firefox-esr.desktop;firefox.desktop;chromium.desktop;google-chrome.desktop;
+x-scheme-handler/http=firefox-esr.desktop;firefox.desktop;chromium.desktop;google-chrome.desktop;
+x-scheme-handler/https=firefox-esr.desktop;firefox.desktop;chromium.desktop;google-chrome.desktop;
+x-scheme-handler/about=firefox-esr.desktop;firefox.desktop;chromium.desktop;

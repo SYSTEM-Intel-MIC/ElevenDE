@@ -1,0 +1,19 @@
+! ElevenDE X resources: UTF-8 + CJK-capable fonts for terminals.
+! Merged by elevende-session via  xrdb -merge /etc/X11/Xresources.d/elevende
+
+XTerm*utf8:            true
+XTerm*locale:          true
+XTerm*renderFont:      true
+! "Noto Sans Mono CJK SC" renders Latin as double-width, which is why
+! English letters look abnormally spaced apart.  Use a tight Latin mono
+! face and reserve the CJK face only for wide glyphs.
+XTerm*faceName:        DejaVu Sans Mono
+XTerm*faceSize:        11
+XTerm*wideFontName:    Noto Sans Mono CJK SC
+XTerm*preeditType:     None
+XTerm*allowWindowOps:  true
+XTerm*saveLines:       5000
+XTerm*background:      #111417
+XTerm*foreground:      #e6e6e6
+xterm*background:      #111417
+xterm*foreground:      #e6e6e6

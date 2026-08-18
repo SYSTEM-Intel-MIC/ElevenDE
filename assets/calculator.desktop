@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=计算器
+Name[en]=Calculator
+Comment=Windows 11 style standard calculator (ElevenDE)
+Exec=elevende-calc
+Icon=accessories-calculator
+Terminal=false
+Categories=Utility;Calculator;
+StartupWMClass=elevende-calc

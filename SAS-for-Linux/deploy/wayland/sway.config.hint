@@ -1,0 +1,9 @@
+# Sway (wlroots): 把下面一行加到 ~/.config/sway/config
+# 然后按 $mod+Shift+C 重载配置
+
+# 绑定 Ctrl+Alt+Delete → 冷启动并弹出安全选项屏幕
+# （不写 exec 自启：sas-screen --show 会自行启动，登录后不会自动打开）
+bindsym Control+Alt+Delete exec sas-screen --show
+
+# 说明：Sway 无原生 blur，SAS 界面显示为 Win11 深色暗化背景；
+#       全屏窗口天然置顶并独占输入焦点。

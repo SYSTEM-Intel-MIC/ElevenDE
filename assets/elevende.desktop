@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=ElevenDE
+Comment=Windows 11 style desktop for Linux (X11, startx session)
+Exec=/usr/local/bin/elevende-session
+Type=Application
+DesktopNames=ElevenDE

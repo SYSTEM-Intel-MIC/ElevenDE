@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "comment": "ElevenDE default shortcuts - Windows conventions. Keys use Openbox syntax: W=Super/Win, A=Alt, C=Ctrl, S=Shift. type: exec=run command, wm=window-manager action(s) separated by ';', sas=owned by the SAS Screen daemon (not an Openbox binding).",
+  "shortcuts": [
+    { "id": "show-desktop",  "name": "显示桌面",           "keys": "W-d",          "type": "wm",   "command": "ToggleShowDesktop", "enabled": true },
+    { "id": "explorer",      "name": "打开文件资源管理器", "keys": "W-e",          "type": "exec", "command": "explorer.exe",      "enabled": true },
+    { "id": "run",           "name": "打开\"运行\"对话框", "keys": "W-r",          "type": "exec", "command": "runbox",            "enabled": true },
+    { "id": "lock",          "name": "锁定屏幕",           "keys": "W-l",          "type": "exec", "command": "elevende-lock",     "enabled": true },
+    { "id": "settings",      "name": "打开设置",           "keys": "W-i",          "type": "exec", "command": "elevende-settings", "enabled": true },
+    { "id": "notepad",       "name": "打开记事本",         "keys": "W-S-n",        "type": "exec", "command": "elevende-notepad",  "enabled": true },
+    { "id": "taskmgr",       "name": "打开任务管理器",     "keys": "C-S-Escape",   "type": "exec", "command": "elevende-taskmgr",  "enabled": true },
+    { "id": "maximize",      "name": "最大化窗口",         "keys": "W-Up",         "type": "wm",   "command": "Maximize",          "enabled": true },
+    { "id": "minimize",      "name": "最小化窗口",         "keys": "W-Down",       "type": "wm",   "command": "Iconify",           "enabled": true },
+    { "id": "snap-left",     "name": "窗口贴靠左半屏",     "keys": "W-Left",       "type": "wm",   "command": "UnmaximizeFull;HalfLeft",  "enabled": true },
+    { "id": "snap-right",    "name": "窗口贴靠右半屏",     "keys": "W-Right",      "type": "wm",   "command": "UnmaximizeFull;HalfRight", "enabled": true },
+    { "id": "close",         "name": "关闭窗口",           "keys": "A-F4",         "type": "wm",   "command": "Close",             "enabled": true },
+    { "id": "alt-tab",       "name": "切换窗口",           "keys": "A-Tab",        "type": "wm",   "command": "NextWindow",        "enabled": true },
+    { "id": "alt-tab-back",  "name": "切换窗口（反向）",   "keys": "A-S-Tab",      "type": "wm",   "command": "PreviousWindow",    "enabled": true },
+    { "id": "screenshot",    "name": "截取全屏截图",       "keys": "Print",        "type": "exec", "command": "elevende-screenshot", "enabled": true },
+    { "id": "sas",           "name": "安全选项屏幕 (Ctrl+Alt+Delete)", "keys": "C-A-Delete", "type": "sas", "command": "sas-screen", "enabled": true },
+    { "id": "vol-up",        "name": "音量增大",           "keys": "XF86AudioRaiseVolume", "type": "exec", "command": "amixer -q sset Master 5%+",  "enabled": true },
+    { "id": "vol-down",      "name": "音量减小",           "keys": "XF86AudioLowerVolume", "type": "exec", "command": "amixer -q sset Master 5%-",  "enabled": true },
+    { "id": "vol-mute",      "name": "静音切换",           "keys": "XF86AudioMute",        "type": "exec", "command": "amixer -q sset Master toggle", "enabled": true }
+  ]
+}

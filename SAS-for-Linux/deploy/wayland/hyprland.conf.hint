@@ -1,0 +1,14 @@
+# Hyprland: 把下面内容合并到 ~/.config/hypr/hyprland.conf
+# 然后 hyprctl reload（或按 Mod+Shift+R 重载）
+
+# 1) 绑定 Ctrl+Alt+Delete → 冷启动并弹出安全选项屏幕
+#    （不写 exec-once 自启：sas-screen --show 会自行启动，登录后不会自动打开）
+bind = CONTROL ALT, Delete, exec, sas-screen --show
+
+# 2) 可选：毛玻璃 + 置顶 —— Hyprland 原生支持（keepabove 确保盖住所有窗口）
+windowrule = keepabove, class:^(sas-screen)$
+windowrule = blur, class:^(sas-screen)$
+windowrule = opacity 0.92 0.92, class:^(sas-screen)$
+
+# 说明：本窗口是 frameless fullscreen，Hyprland 会自动置顶并独占全屏；
+#       app_id 为 sas-screen（Qt Wayland 由 desktopFileName 决定）。

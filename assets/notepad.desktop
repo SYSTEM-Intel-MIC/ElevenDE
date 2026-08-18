@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=记事本
+Name[en]=Notepad
+Comment=Windows 11 style text editor (ElevenDE)
+Exec=elevende-notepad %F
+Icon=accessories-text-editor
+Terminal=false
+Categories=Utility;TextEditor;
+MimeType=text/plain;
+StartupWMClass=elevende-notepad

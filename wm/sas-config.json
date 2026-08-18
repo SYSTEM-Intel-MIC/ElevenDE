@@ -1,0 +1,67 @@
+{
+    "注释": "ElevenDE 定制版 SAS（Ctrl+Alt+Delete 安全选项屏幕）按钮映射。锁定/任务管理器对接 ElevenDE 自研组件，注销优先走 loginctl，回退到 openbox --exit（startx 会话随 Openbox 退出而结束）。",
+    "buttons": {
+        "锁定": {
+            "command": "elevende-lock",
+            "args": [],
+            "fallback": [
+                { "command": "loginctl", "args": ["lock-session"] }
+            ],
+            "exitAfter": true
+        },
+        "切换用户": {
+            "command": "loginctl",
+            "args": ["lock-session"],
+            "exitAfter": true
+        },
+        "注销": {
+            "command": "loginctl",
+            "args": ["terminate-session", "self"],
+            "fallback": [
+                { "command": "openbox", "args": ["--exit"] }
+            ],
+            "exitAfter": true
+        },
+        "更改密码": {
+            "command": "xterm",
+            "args": ["-title", "更改密码", "-e", "passwd"],
+            "fallback": [
+                { "command": "xdg-terminal-exec", "args": ["passwd"] },
+                { "command": "gnome-terminal", "args": ["--", "passwd"] },
+                { "command": "konsole", "args": ["-e", "passwd"] }
+            ],
+            "exitAfter": true
+        },
+        "任务管理器": {
+            "command": "elevende-taskmgr",
+            "args": [],
+            "fallback": [
+                { "command": "missioncenter", "args": [] },
+                { "command": "gnome-system-monitor", "args": [] },
+                { "command": "xfce4-taskmanager", "args": [] }
+            ],
+            "exitAfter": true
+        }
+    },
+    "footer": {
+        "input": {
+            "command": "ibus",
+            "args": ["engine"],
+            "fallback": [
+                { "command": "fcitx5", "args": ["-n", "keyboard"] }
+            ]
+        },
+        "network": {
+            "command": "",
+            "args": [],
+            "注释": "空命令 = 打开应用内 Wi-Fi 切换面板（自动识别 NetworkManager/iwd）"
+        },
+        "accessibility": {
+            "command": "elevende-settings",
+            "args": [],
+            "fallback": [
+                { "command": "gnome-control-center", "args": ["universal-access"] }
+            ]
+        }
+    }
+}

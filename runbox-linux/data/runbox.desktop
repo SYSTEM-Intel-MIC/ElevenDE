@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=运行 (RunBox)
+Name[en]=RunBox
+GenericName=Run Dialog
+Comment=Windows 风格的"运行"对话框
+Comment[zh_CN]=Windows 风格的"运行"对话框
+Exec=runbox
+Icon=runbox
+Terminal=false
+Categories=Utility;GTK;
+Keywords=run;launch;运行;win+r;

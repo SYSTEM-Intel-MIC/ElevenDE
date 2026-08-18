@@ -1,0 +1,120 @@
+# ElevenDE - Windows 11 style dark Openbox theme
+
+# Geometry
+padding.width: 6
+padding.height: 6
+border.width: 1
+window.handle.width: 0
+window.client.padding.width: 0
+window.client.padding.height: 0
+window.button.width: 34
+window.button.height: 30
+window.button.spacing: 0
+menu.border.width: 1
+menu.separator.width: 1
+menu.separator.padding.width: 6
+menu.separator.padding.height: 3
+menu.overlap.x: 0
+menu.overlap.y: 0
+osd.border.width: 1
+
+# Borders
+window.active.border.color: #0f6cbd
+window.inactive.border.color: #393e4a
+window.active.title.separator.color: #0f6cbd
+window.inactive.title.separator.color: #3a4050
+window.active.client.color: #101418
+window.inactive.client.color: #101418
+menu.border.color: #21262f
+osd.border.color: #0f6cbd
+
+# Active window
+window.label.text.justify: Center
+window.active.title.bg: Solid Flat
+window.active.title.bg.color: #262a35
+window.active.label.bg: Parentrelative
+window.active.label.text.color: #f2f4f8
+window.active.handle.bg: Solid Flat
+window.active.handle.bg.color: #262a35
+window.active.grip.bg: Parentrelative
+
+# Active window buttons
+window.active.button.unpressed.bg: Parentrelative
+window.active.button.unpressed.image.color: #d7dce5
+window.active.button.hover.bg: Solid Flat
+window.active.button.hover.bg.color: #3a3f4b
+window.active.button.hover.image.color: #ffffff
+window.active.button.pressed.bg: Solid Flat
+window.active.button.pressed.bg.color: #32373f
+window.active.button.pressed.image.color: #c6ccd6
+window.active.button.disabled.bg: Parentrelative
+window.active.button.disabled.image.color: #565d6b
+window.active.button.toggled.unpressed.bg: Parentrelative
+window.active.button.toggled.unpressed.image.color: #9fc1ea
+window.active.button.toggled.hover.bg: Solid Flat
+window.active.button.toggled.hover.bg.color: #3c6598
+window.active.button.toggled.hover.image.color: #ffffff
+window.active.button.toggled.pressed.bg: Solid Flat
+window.active.button.toggled.pressed.bg.color: #2c466b
+window.active.button.toggled.pressed.image.color: #c6ccd6
+
+# Inactive window
+window.inactive.title.bg: Solid Flat
+window.inactive.title.bg.color: #343945
+window.inactive.label.bg: Parentrelative
+window.inactive.label.text.color: #b8bfca
+window.inactive.handle.bg: Solid Flat
+window.inactive.handle.bg.color: #343945
+window.inactive.grip.bg: Parentrelative
+
+# Inactive window buttons
+window.inactive.button.unpressed.bg: Parentrelative
+window.inactive.button.unpressed.image.color: #9aa3b2
+window.inactive.button.hover.bg: Solid Flat
+window.inactive.button.hover.bg.color: #3a4356
+window.inactive.button.hover.image.color: #e8ebef
+window.inactive.button.pressed.bg: Solid Flat
+window.inactive.button.pressed.bg.color: #2b2f39
+window.inactive.button.pressed.image.color: #8a93a2
+window.inactive.button.disabled.bg: Parentrelative
+window.inactive.button.disabled.image.color: #565d6b
+window.inactive.button.toggled.unpressed.bg: Parentrelative
+window.inactive.button.toggled.unpressed.image.color: #9fc1ea
+window.inactive.button.toggled.hover.bg: Solid Flat
+window.inactive.button.toggled.hover.bg.color: #3a4356
+window.inactive.button.toggled.hover.image.color: #e8ebef
+window.inactive.button.toggled.pressed.bg: Solid Flat
+window.inactive.button.toggled.pressed.bg.color: #2b2f39
+window.inactive.button.toggled.pressed.image.color: #8a93a2
+
+# Menus (root menu + client menu)
+menu.title.bg: Solid Flat
+menu.title.bg.color: #0f6cbd
+menu.title.text.color: #ffffff
+menu.title.text.justify: Left
+menu.items.bg: Solid Flat
+menu.items.bg.color: #1f232b
+menu.items.text.color: #e6e9ef
+menu.items.disabled.text.color: #5c6472
+menu.items.active.bg: Solid Flat
+menu.items.active.bg.color: #2f5c8a
+menu.items.active.text.color: #ffffff
+menu.items.active.disabled.text.color: #7a8292
+menu.separator.color: #383e4a
+
+# OSD (Alt-Tab / feedback popups)
+osd.bg: Solid Flat
+osd.bg.color: #20242c
+osd.label.bg: Parentrelative
+osd.label.text.color: #e6e9ef
+osd.hilight.bg: Solid Flat
+osd.hilight.bg.color: #0f6cbd
+osd.unhilight.bg: Solid Flat
+osd.unhilight.bg.color: #2c3140
+
+# Text shadows
+window.active.label.text.font: shadow=y:shadowtint=20:shadowoffset=1
+window.inactive.label.text.font: shadow=n
+menu.items.font: shadow=n
+menu.title.text.font: shadow=n
+osd.label.text.font: shadow=y:shadowtint=30:shadowoffset=1

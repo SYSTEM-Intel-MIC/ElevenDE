@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=安全选项屏幕
+Name[en]=SAS Screen
+Comment=Ctrl+Alt+Del secure attention screen (Windows 11 style)
+Exec=sas-screen --show
+Icon=system-lock-screen
+Terminal=false
+Categories=System;
+NoDisplay=true
+StartupWMClass=sas-screen

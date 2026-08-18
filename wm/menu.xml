@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_menu xmlns="http://openbox.org/3.4/menu">
+  <menu id="winmenu" label="窗口">
+    <item label="还原(R)">
+      <action name="UnmaximizeFull"/>
+    </item>
+    <item label="移动(M)">
+      <action name="Move"/>
+    </item>
+    <item label="调整大小(S)">
+      <action name="Resize"/>
+    </item>
+    <separator/>
+    <item label="最小化(N)">
+      <action name="Iconify"/>
+    </item>
+    <item label="最大化(X)">
+      <action name="ToggleMaximize"/>
+    </item>
+    <separator/>
+    <item label="关闭(C)">
+      <action name="Close"/>
+    </item>
+  </menu>
+  <menu id="root-menu" label="ElevenDE">
+    <item label="文件资源管理器">
+      <action name="Execute"><command>explorer.exe</command></action>
+    </item>
+    <item label="终端">
+      <action name="Execute"><command>xterm</command></action>
+    </item>
+    <item label="网页浏览器">
+      <action name="Execute"><command>xdg-open http://localhost/</command></action>
+    </item>
+    <separator/>
+    <item label="注销">
+      <action name="Exit"><prompt>yes</prompt></action>
+    </item>
+  </menu>
+</openbox_menu>

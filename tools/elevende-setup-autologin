@@ -1,0 +1,55 @@
+#!/bin/sh
+# elevende-setup-autologin - configure the machine to boot straight into
+# ElevenDE: tty1 console auto-login -> startx elevende-session.
+#
+# Usage: sudo elevende-setup-autologin [username]
+#        (defaults to $SUDO_USER or the first user in /home)
+
+set -e
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "ERROR: run with sudo" >&2
+    exit 1
+fi
+
+LOGIN_USER="${1:-${SUDO_USER:-}}"
+if [ -z "$LOGIN_USER" ]; then
+    LOGIN_USER="$(ls -1 /home 2>/dev/null | head -1)"
+fi
+[ -n "$LOGIN_USER" ] || { echo "ERROR: no user found; pass a username" >&2; exit 1; }
+
+echo "==> configuring tty1 auto-login for user '$LOGIN_USER'"
+mkdir -p /etc/systemd/system/getty@tty1.service.d
+cat > /etc/systemd/system/getty@tty1.service.d/autologin.conf <<EOF
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin $LOGIN_USER --noclear tty1 linux
+EOF
+systemctl enable getty@tty1.service >/dev/null 2>&1 || true
+
+cat > /etc/profile.d/elevende-session.sh <<EOF
+# ElevenDE: start the desktop automatically on the tty1 console login.
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+if [ -z "\${DISPLAY:-}" ] && [ "\${XDG_VTNR:-}" = "1" ] && [ "\$(id -un)" = "$LOGIN_USER" ]; then
+    exec startx /usr/local/bin/elevende-session
+fi
+EOF
+
+if command -v systemctl >/dev/null 2>&1; then
+    echo "==> setting default boot target to multi-user (boots to console)"
+    systemctl set-default multi-user.target >/dev/null 2>&1 || true
+fi
+
+# disable display managers that would otherwise take over the boot
+for dm in gdm3 gdm lightdm sddm slim; do
+    if systemctl list-unit-files 2>/dev/null | grep -q "^$dm\.service"; then
+        echo "==> disabling display manager: $dm (ElevenDE takes over the boot)"
+        systemctl disable "$dm.service" >/dev/null 2>&1 || true
+    fi
+done
+
+echo ""
+echo "Done. Reboot to enter ElevenDE directly."
+echo "To undo:  sudo rm /etc/profile.d/elevende-session.sh \\"
+echo "              /etc/systemd/system/getty@tty1.service.d/autologin.conf"

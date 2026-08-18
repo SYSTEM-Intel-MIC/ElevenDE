@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=任务管理器
+Name[en]=Task Manager
+Comment=Windows 11 style task manager (ElevenDE)
+Exec=elevende-taskmgr
+Icon=utilities-system-monitor
+Terminal=false
+Categories=System;Monitor;
+StartupWMClass=elevende-taskmgr

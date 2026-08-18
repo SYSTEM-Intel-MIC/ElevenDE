@@ -1,0 +1,22 @@
+# Niri (scrollable-tiling compositor): 使用独立配置文件 + include 引入
+# 这样 sas-screen 的配置不污染你的主 config.kdl，卸载时也干净利落。
+# 注意: Niri 配置是 KDL 格式，注释用 //（双斜杠），不是 #。
+
+# 1) 在主配置 ~/.config/niri/config.kdl 中加一行 include
+#    （相对路径基于配置目录解析，与 include "dms/binds.kdl" 同理）
+#    然后按 Mod+Shift+R 重载配置
+include "sas-screen.kdl"
+
+# 2) 创建独立文件 ~/.config/niri/sas-screen.kdl，内容如下：
+
+// 绑定 Ctrl+Alt+Delete: 冷启动并弹出 SAS 界面
+// （不写 spawn-at-startup 自启：sas-screen --show 会自行启动，登录后不会自动打开）
+binds {
+    Ctrl+Alt+Delete { spawn "sas-screen" "--show"; }
+}
+
+# 说明：
+#   - niri 键名使用 X11 keysym 命名，Delete / Control / Alt 均可直接写；
+#   - niri 目前没有原生窗口模糊，SAS 界面显示为 Win11 深色暗化背景；
+#   - 全屏窗口在 niri 中天然占据工作区并置顶；
+#   - 验证绑定: 按 Mod+Shift+/ 打开快捷键概览。

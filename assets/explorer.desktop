@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=文件资源管理器
+Name[en]=File Explorer
+Comment=Windows 11 style file manager for Linux (Explorer for Linux)
+Exec=explorer.exe
+Icon=system-file-manager
+Terminal=false
+Categories=System;FileManager;Utility;
+StartupWMClass=explorer.exe

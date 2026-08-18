@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=设置
+Name[en]=Settings
+Comment=ElevenDE system settings (Windows 11 style)
+Exec=elevende-settings
+Icon=preferences-system
+Terminal=false
+Categories=Settings;System;
+StartupWMClass=elevende-settings
