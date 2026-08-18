@@ -354,7 +354,7 @@ elevende/
 
 ElevenDE 自有的桌面 Shell、内置应用、构建脚本、配置、品牌资源和集成代码，采用 **GNU General Public License version 3 or any later version（GPL-3.0-or-later）**，许可证全文见 [`LICENSE`](LICENSE)。
 
-ElevenDE 同时集成了 [SAS-for-Linux](https://github.com/macOS-Terminal/SAS-for-Linux) 与 [Explorer-for-Linux](https://github.com/macOS-Terminal/Explorer-for-Linux)。这两个上游项目在当前云端 `main` 页面未显示明确的 LICENSE 文件，因此其代码不能仅因为 ElevenDE 根目录改为 GPL 就被自动重新授权。请参阅 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) 获取固定提交、来源和许可边界说明。
+ElevenDE 同时集成了 [SAS-for-Linux](https://github.com/macOS-Terminal/SAS-for-Linux)、[Explorer-for-Linux](https://github.com/macOS-Terminal/Explorer-for-Linux) 与 [runbox-linux](https://github.com/SYSTEM-Intel-MIC/runbox-linux)。SAS-for-Linux 和 Explorer-for-Linux 在当前云端 `main` 页面未显示明确的 LICENSE 文件；runbox-linux 的 README 明确标注 MIT。因此这些上游代码不能仅因为 ElevenDE 根目录改为 GPL 就被自动重新授权。请参阅 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) 获取固定提交、来源和许可边界说明。
 
 如果某个上游项目的权利人未来正式添加 GPL 许可证，应以上游仓库的 LICENSE 文件和提交记录为准。ElevenDE 的 GPL 许可不替代第三方代码原有或尚未明确的许可证。
 
