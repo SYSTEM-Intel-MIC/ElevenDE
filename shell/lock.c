@@ -44,9 +44,9 @@ static Visual *vis;
 static Colormap cmap;
 static GC       bgc;
 static int      scr_w, scr_h;
-static XftFont *f_clock, *f_label, *f_pw, f_avatar_dummy;
-static XftFont *f_avatar;
+static XftFont *f_clock, *f_label, *f_pw;
 static Pixmap wall_pm = None;      /* darkened wallpaper, screen-sized */
+static Pixmap avatar_pm = None;    /* official Fluent default account icon */
 static Pixmap frame_pm = None;     /* 完整页面的离屏帧，避免直接逐项重绘闪烁 */
 static int box_x, box_y, box_w, box_h;      /* password field geometry */
 static int btn_x, btn_y, btn_s;             /* submit arrow button       */
@@ -54,7 +54,11 @@ static int pw_hover = 0;                    /* pointer is inside input   */
 static int pw_focused = 1;                  /* keyboard always targets it */
 static int caret_visible = 1;               /* visual blink phase        */
 
-static const char *user = NULL;
+/* `login_user` is always the UNIX account used for authentication; the
+ * display name comes from its GECOS field so the UI shows the name created by
+ * the user, rather than a hard-coded account or environment placeholder. */
+static char login_user[128] = "";
+static char display_user[256] = "";
 static char pw[PW_MAX];
 static int  pwlen = 0;
 static int  failed = 0;
@@ -88,6 +92,25 @@ static unsigned long px(int r, int g, int b) {
     return BlackPixel(dpy, scr);
 }
 
+static void resolve_user_identity(void) {
+    const char *env_user = getenv("USER");
+    /* getuid() intentionally uses the real session owner even though the
+       installed helper is setuid-root solely to read /etc/shadow. */
+    struct passwd *pe = getpwuid(getuid());
+    if (!pe && env_user && *env_user) pe = getpwnam(env_user);
+    const char *account = pe && pe->pw_name && *pe->pw_name
+                        ? pe->pw_name : (env_user && *env_user ? env_user : "user");
+    snprintf(login_user, sizeof login_user, "%s", account);
+
+    const char *gecos = pe ? pe->pw_gecos : NULL;
+    size_t n = gecos ? strcspn(gecos, ",") : 0;
+    while (n > 0 && (gecos[n - 1] == ' ' || gecos[n - 1] == '\t')) n--;
+    if (n > 0)
+        snprintf(display_user, sizeof display_user, "%.*s", (int)n, gecos);
+    if (!display_user[0])
+        snprintf(display_user, sizeof display_user, "%s", login_user);
+}
+
 static void fill_round_lock(int x, int y, int w, int h, int r, unsigned long p) {
     XSetForeground(dpy, bgc, p);
     if (r > w / 2) r = w / 2;
@@ -113,7 +136,7 @@ static void load_wallpaper(void) {
     struct stat st;
     if (!path[0] || stat(path, &st) != 0)
         snprintf(path, sizeof path,
-                 "/usr/local/share/elevende-shell/wallpapers/wallpaper-bloom.png");
+                 "/usr/local/share/elevende-shell/wallpapers/wallpaper-lindows-light.png");
     if (stat(path, &st) != 0) return;
     GError *err = NULL;
     GdkPixbuf *pb = gdk_pixbuf_new_from_file(path, &err);
@@ -153,6 +176,59 @@ static void load_wallpaper(void) {
 #endif
 }
 
+/* Load the packaged Fluent Person Filled glyph into a small pixmap.  Alpha is
+ * composited against the avatar disc colour here because XCopyArea has no
+ * alpha channel; this keeps anti-aliased edges clean instead of producing a
+ * rectangular dark halo. */
+static void load_default_avatar(void) {
+#ifdef HAVE_GDKPIXBUF
+    /* The dedicated copy is installed beside the shell data.  It is the
+       primary path for this setuid login helper; the icon-tree path remains a
+       compatibility fallback for developer builds and older installations. */
+    const char *paths[] = {
+        "/usr/local/share/elevende-shell/login-user-avatar.png",
+        "/usr/local/share/elevende-shell/icons/96x96/apps/login-user-avatar.png",
+        NULL
+    };
+    GdkPixbuf *pb = NULL;
+    for (int i = 0; paths[i] && !pb; i++) {
+        GError *err = NULL;
+        pb = gdk_pixbuf_new_from_file_at_scale(paths[i], 74, 74, TRUE, &err);
+        if (err) g_error_free(err);
+    }
+    if (!pb) return;
+    int w = gdk_pixbuf_get_width(pb), h = gdk_pixbuf_get_height(pb);
+    int rs = gdk_pixbuf_get_rowstride(pb);
+    int nch = gdk_pixbuf_get_n_channels(pb);
+    int ha = gdk_pixbuf_get_has_alpha(pb);
+    const guchar *pd = gdk_pixbuf_get_pixels(pb);
+    if (w < 1 || h < 1 || (nch != 3 && nch != 4)) { g_object_unref(pb); return; }
+    XImage *im = XCreateImage(dpy, vis, DefaultDepth(dpy, scr), ZPixmap, 0,
+                              malloc((size_t)w * h * 4), w, h, 32, 0);
+    if (!im) { g_object_unref(pb); return; }
+    const int br = 43, bg = 58, bb = 105;  /* avatar-disc base colour */
+    for (int y = 0; y < h; y++) {
+        const guchar *row = pd + (size_t)y * rs;
+        for (int x = 0; x < w; x++) {
+            int a = ha ? row[x * nch + 3] : 255;
+            int r = (row[x * nch + 0] * a + br * (255 - a)) / 255;
+            int g = (row[x * nch + 1] * a + bg * (255 - a)) / 255;
+            int b = (row[x * nch + 2] * a + bb * (255 - a)) / 255;
+            char *d = im->data + y * im->bytes_per_line + x * 4;
+            if (im->byte_order == LSBFirst) {
+                d[0] = (char)b; d[1] = (char)g; d[2] = (char)r; d[3] = 0;
+            } else {
+                d[0] = 0; d[1] = (char)r; d[2] = (char)g; d[3] = (char)b;
+            }
+        }
+    }
+    avatar_pm = XCreatePixmap(dpy, root, w, h, DefaultDepth(dpy, scr));
+    XPutImage(dpy, avatar_pm, bgc, im, 0, 0, 0, 0, w, h);
+    XDestroyImage(im);
+    g_object_unref(pb);
+#endif
+}
+
 static void paint(void) {
     Drawable dst = paint_target();
     int cx = scr_w / 2;
@@ -179,31 +255,24 @@ static void paint(void) {
 
     XftDraw *xd = XftDrawCreate(dpy, dst, vis, cmap);
 
-    /* avatar circle with the user initial (Win11 shows an avatar) */
-    int av_r = 48;
-    int av_cy = scr_h / 2 - 130;
-    XSetForeground(dpy, bgc, px(0x2b, 0x57, 0x9a));
+    /* Windows 11-style account disc with the official Fluent Person Filled
+       icon.  The fallback is deliberately minimal and is reached only if a
+       damaged installation is missing the packaged asset. */
+    int av_r = 56;
+    int av_cy = scr_h / 2 - 138;
+    XSetForeground(dpy, bgc, px(0x25, 0x35, 0x63));
     XFillArc(dpy, dst, bgc, cx - av_r, av_cy - av_r, av_r * 2, av_r * 2,
              0, 360 * 64);
-    XSetForeground(dpy, bgc, px(0x3c, 0x6e, 0xbd));
-    XFillArc(dpy, dst, bgc, cx - av_r + 3, av_cy - av_r + 3,
-             av_r * 2 - 6, av_r * 2 - 6, 0, 360 * 64);
-    char initial[8] = "?";
-    if (user && *user) {
-        /* first UTF-8 character of the user name */
-        int len = 1;
-        unsigned char b0 = (unsigned char)user[0];
-        if ((b0 & 0xE0) == 0xC0) len = 2;
-        else if ((b0 & 0xF0) == 0xE0) len = 3;
-        else if ((b0 & 0xF8) == 0xF0) len = 4;
-        memcpy(initial, user, len);
-        initial[len] = 0;
-    }
-    str_center(xd, f_avatar, &cbtn, cx, av_cy + f_avatar->ascent / 2 - 4,
-               initial);
+    XSetForeground(dpy, bgc, px(0x2b, 0x3a, 0x69));
+    XFillArc(dpy, dst, bgc, cx - av_r + 2, av_cy - av_r + 2,
+             av_r * 2 - 4, av_r * 2 - 4, 0, 360 * 64);
+    if (avatar_pm)
+        XCopyArea(dpy, avatar_pm, dst, bgc, 0, 0, 74, 74, cx - 37, av_cy - 37);
+    /* No textual fallback: a damaged asset must never show a literal “?” on
+       the login page. The dedicated packaged icon above is the normal path. */
 
-    /* user name */
-    str_center(xd, f_clock, &ctxt, cx, av_cy + av_r + 58, user ? user : "");
+    /* The display name comes from the user's own system account metadata. */
+    str_center(xd, f_clock, &ctxt, cx, av_cy + av_r + 54, display_user);
 
     /* password field (Win11: focused translucent field + submit arrow) */
     box_w = 320; box_h = 46;
@@ -319,8 +388,13 @@ static int check_pw(const char *u, const char *p) {
     const char *hash = pe->pw_passwd;
     if (!hash || !*hash) return 1;                   /* no password set */
     if (!strcmp(hash, "x") || !strcmp(hash, "*")) {
+        /* Debian keeps the authoritative value in shadow.  An empty
+           `sp_pwdp` is a valid no-password account and must remain empty;
+           the previous conditional left `hash` as literal "x" and rejected
+           an otherwise valid empty login. */
         struct spwd *sp = getspnam(u);
-        if (sp && sp->sp_pwdp && *sp->sp_pwdp) hash = sp->sp_pwdp;
+        if (!sp || !sp->sp_pwdp) return -1;
+        hash = sp->sp_pwdp;
     }
     if (!hash || !*hash) return 1;
     if (hash[0] == '!' || hash[0] == '*') return 0;  /* locked account */
@@ -332,9 +406,6 @@ int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "--login")) login_mode = 1;
     signal(SIGCHLD, SIG_IGN);
     signal(SIGTSTP, SIG_IGN);
-
-    user = getenv("USER");
-    if (!user || !*user) user = "kali";
 
     dpy = XOpenDisplay(NULL);
     if (!dpy) { fprintf(stderr, "lock: cannot open display\n"); return 1; }
@@ -351,12 +422,9 @@ int main(int argc, char **argv) {
     f_clock  = XftFontOpenName(dpy, scr, "Noto Sans CJK SC:pixelsize=26");
     f_label  = XftFontOpenName(dpy, scr, "Noto Sans CJK SC:pixelsize=13");
     f_pw     = XftFontOpenName(dpy, scr, "Noto Sans CJK SC:pixelsize=18");
-    f_avatar = XftFontOpenName(dpy, scr, "Noto Sans CJK SC:bold:pixelsize=44");
     if (!f_clock)  f_clock  = XftFontOpenName(dpy, scr, "sans-serif:pixelsize=26");
     if (!f_label)  f_label  = XftFontOpenName(dpy, scr, "sans-serif:pixelsize=13");
     if (!f_pw)     f_pw     = XftFontOpenName(dpy, scr, "sans-serif:pixelsize=18");
-    if (!f_avatar) f_avatar = XftFontOpenName(dpy, scr, "sans-serif:bold:pixelsize=44");
-    (void)f_avatar_dummy;
 
     /* dedicated full-screen panel so the lock stays above all other windows
        even while Openbox/compositor keep running underneath */
@@ -387,7 +455,9 @@ int main(int argc, char **argv) {
         XFlush(dpy);
     }
 
+    resolve_user_identity();
     load_wallpaper();
+    load_default_avatar();
     paint();                                        /* draw before grabbing */
 
     if (!grab_all()) {
@@ -464,7 +534,7 @@ int main(int argc, char **argv) {
                 if (pwlen == 0) {
                     /* allow Enter with an empty password only when the
                      * account has no password set at all */
-                    int r0 = check_pw(user, "");
+                    int r0 = check_pw(login_user, "");
                     if (r0 == 1) {
                         release_all();
                         XSync(dpy, False);
@@ -477,7 +547,7 @@ int main(int argc, char **argv) {
                 }
                 char pwz[PW_MAX + 1];
                 memcpy(pwz, pw, pwlen); pwz[pwlen] = 0;
-                int r = check_pw(user, pwz);
+                int r = check_pw(login_user, pwz);
                 if (r == 1) {                        /* unlocked */
                     release_all();
                     XSync(dpy, False);

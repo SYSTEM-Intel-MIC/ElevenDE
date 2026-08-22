@@ -11,6 +11,9 @@
  */
 
 #include <QApplication>
+#include <QEvent>
+#include <QObject>
+#include <QWidget>
 #include <QColor>
 #include <QFont>
 #include <QIcon>
@@ -28,20 +31,46 @@ inline QColor defaultAccent() { return QColor(QStringLiteral("#0078D4")); }
 /* Read the accent the user picked in the Settings app, if any. */
 inline QColor accentColor()
 {
-    QSettings s(QStringLiteral("elevende"), QStringLiteral("elevende"));
-    const QString v = s.value(QStringLiteral("accent"), QString()).toString();
-    if (!v.isEmpty() && QColor::isValidColor(v))
-        return QColor(v);
+    /* Lindows intentionally uses the fixed Windows 11 default blue. The
+       Settings app no longer exposes unsupported custom color controls. */
     return defaultAccent();
 }
 
 inline bool darkMode()
 {
-    QSettings s(QStringLiteral("elevende"), QStringLiteral("elevende"));
-    return s.value(QStringLiteral("darkMode"), true).toBool();
+    /* Light-only surface, matching the Lindows Settings contract. */
+    return false;
 }
 
 /* A complete Fluent-style stylesheet for the current accent/dark setting. */
+inline QString materialTexturePath()
+{
+    const QString system = QStringLiteral("/usr/local/share/elevende-shell/material/mica-noise.png");
+    if (QFileInfo::exists(system)) return system;
+    return QCoreApplication::applicationDirPath() + QStringLiteral("/../share/elevende-shell/material/mica-noise.png");
+}
+
+class AcrylicWindowFilter final : public QObject
+{
+public:
+    using QObject::QObject;
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (event->type() == QEvent::Polish || event->type() == QEvent::Show) {
+            if (auto *window = qobject_cast<QWidget *>(watched); window && window->isWindow()) {
+                /* Do not make normal application windows translucent. On X11
+                   this can leave an ARGB parent over the child widget tree,
+                   producing blank content and swallowing interaction. The
+                   Mica-like surface is rendered by opaque QSS layers instead. */
+                window->setAttribute(Qt::WA_TranslucentBackground, false);
+                window->setProperty("micaMaterial", false);
+            }
+        }
+        return QObject::eventFilter(watched, event);
+    }
+};
+
 inline QString stylesheet()
 {
     const QColor accent = accentColor();
@@ -57,11 +86,18 @@ inline QString stylesheet()
     const QString pressed = dark ? QStringLiteral("#404040") : QStringLiteral("#DDDDDD");
     const QString field   = dark ? QStringLiteral("#1F1F1F") : QStringLiteral("#FFFFFF");
     const QString accentTxt = QStringLiteral("#FFFFFF");
+    const QString material = materialTexturePath();
+    const QString micaBase = dark ? QStringLiteral("rgba(32, 36, 43, 218)")
+                                  : QStringLiteral("rgba(246, 248, 252, 224)");
+    const QString micaCard = dark ? QStringLiteral("rgba(47, 53, 63, 220)")
+                                  : QStringLiteral("rgba(255, 255, 255, 218)");
 
     QString qss;
     qss += QStringLiteral(
         "* { font-family: 'Segoe UI', 'Noto Sans CJK SC', 'Microsoft YaHei', sans-serif; }\n"
         "QWidget { background-color: %1; color: %2; font-size: 13px; }\n"
+        "QMainWindow, QDialog, QWidget[micaMaterial=\"true\"] { background-color: %14; background-image: url(%15); border: 1px solid rgba(255,255,255,0.10); }\n"
+        "QFrame[card=\"true\"], QWidget[card=\"true\"] { background-color: %16; background-image: url(%15); }\n"
         "QLabel { background: transparent; }\n"
         "QLabel[subtle=\"true\"] { color: %3; }\n"
 
@@ -137,25 +173,36 @@ inline QString stylesheet()
         "QCheckBox, QRadioButton { spacing: 8px; }"
         "QCheckBox::indicator, QRadioButton::indicator { width: 18px; height: 18px; }"
         "QCheckBox::indicator { border: 1px solid %3; border-radius: 4px; background: %13; }"
-        "QCheckBox::indicator:checked { background: %9; border-color: %9; }\n"
+        "QCheckBox::indicator:checked { background: %9; border-color: %9; image: url(/usr/local/share/elevende-shell/icons/32x32/apps/checkmark.png); }\n"
 
         /* Sliders */
+        "QSlider { min-height: 24px; }"
         "QSlider::groove:horizontal { height: 4px; background: %5; border-radius: 2px; }"
-        "QSlider::handle:horizontal { background: %9; width: 16px; height: 16px;"
+        "QSlider::sub-page:horizontal { background: %9; height: 4px; border-radius: 2px; }"
+        "QSlider::handle:horizontal { background: %9; border: 2px solid %9; width: 16px; height: 16px;"
         " margin: -6px 0; border-radius: 8px; }\n"
 
         /* Progress */
         "QProgressBar { background: %4; border: 1px solid %5; border-radius: 6px; text-align: center; }"
         "QProgressBar::chunk { background: %9; border-radius: 5px; }\n"
 
-        /* Status bar */
-        "QStatusBar { background: %1; color: %3; border-top: 1px solid %5; }\n"
+        /* Global Fluent navigation surfaces */
+        "QWidget[navRail=\"true\"] { background-color: %13; border-right: 1px solid %5; }\n"
+        "QWidget[navRail=\"true\"] QToolButton { background: transparent; color: %2; border: none; border-radius: 8px; font-size: 14px; padding: 8px 12px; text-align: left; }\n"
+        "QWidget[navRail=\"true\"] QToolButton:hover { background-color: %7; }\n"
+        "QWidget[navRail=\"true\"] QToolButton:checked { background-color: %9; color: %10; }\n"
+        "QWidget[navRail=\"true\"] QToolButton:focus { outline: none; border: 1px solid %9; }\n"
+        /* Performance cards / Task Manager */
+        "QWidget[graphCell=\"true\"] { background-color: %13; border: 1px solid %5; border-radius: 3px; }\n"
+        "QWidget[graphCell=\"true\"] QLabel { padding-left: 6px; }\n"
+        "QStatusBar { background: %1; color: %3; border-top: 1px solid %5; padding: 3px 8px; }\n"
+        "QStatusBar QLabel { margin-left: 12px; }\n"
 
         /* Tooltips */
         "QToolTip { background-color: %6; color: %2; border: 1px solid %5; padding: 4px 8px; border-radius: 4px; }\n"
     ).arg(bg, text, sub, card, border, card2, hover, pressed,
           accent.name(), accentTxt,
-          accent.lighter(115).name(), accent.darker(120).name(), field);
+          accent.lighter(115).name(), accent.darker(120).name(), field, micaBase, material, micaCard);
 
     return qss;
 }
@@ -165,16 +212,25 @@ inline QString stylesheet()
  * keeps taskbar buttons from degrading to a black/blank placeholder. */
 inline QIcon appIcon(const QString &name)
 {
-    const QStringList roots = {
-        QStringLiteral("/usr/local/share/elevende-shell/icons/scalable/apps/"),
+    const QStringList pngRoots = {
         QStringLiteral("/usr/local/share/elevende-shell/icons/64x64/apps/"),
-        QCoreApplication::applicationDirPath() + QStringLiteral("/../share/elevende-shell/icons/scalable/apps/")
+        QStringLiteral("/usr/local/share/elevende-shell/icons/48x48/apps/"),
+        QStringLiteral("/usr/local/share/elevende-shell/icons/32x32/apps/"),
+        QCoreApplication::applicationDirPath() + QStringLiteral("/../share/elevende-shell/icons/64x64/apps/")
     };
-    for (const QString &root : roots) {
-        const QString svg = root + name + QStringLiteral(".svg");
-        if (QFileInfo::exists(svg)) return QIcon(svg);
+    for (const QString &root : pngRoots) {
+        /* Official WindowsIcons PNGs are authoritative. SVG is never tried
+           before them because the generated aliases can be blank or stale. */
         const QString png = root + name + QStringLiteral(".png");
         if (QFileInfo::exists(png)) return QIcon(png);
+    }
+    const QStringList svgRoots = {
+        QStringLiteral("/usr/local/share/elevende-shell/icons/scalable/apps/"),
+        QCoreApplication::applicationDirPath() + QStringLiteral("/../share/elevende-shell/icons/scalable/apps/")
+    };
+    for (const QString &root : svgRoots) {
+        const QString svg = root + name + QStringLiteral(".svg");
+        if (QFileInfo::exists(svg)) return QIcon(svg);
     }
     return QIcon::fromTheme(name);
 }
@@ -184,6 +240,12 @@ inline void apply(QApplication &app)
 {
     app.setStyle(QStyleFactory::create(QStringLiteral("Fusion")));
     app.setStyleSheet(stylesheet());
+    /* Make top-level Qt windows compositor-friendly. The GLX picom profile
+     * supplies the real backdrop blur; the SVG supplies deterministic noise
+     * and keeps the surface attractive when GLX blur is unavailable. */
+    /* The filter keeps ordinary Qt client content opaque on X11; blur is a
+       compositor-only decoration effect and must never cover controls. */
+    app.installEventFilter(new AcrylicWindowFilter(&app));
 
     QFont f = app.font();
     f.setPointSizeF(10.0);

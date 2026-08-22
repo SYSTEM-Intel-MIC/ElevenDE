@@ -1,0 +1,9 @@
+# ElevenDE 版权与发布通知
+
+Copyright (C) 2026 SYSTEM-Intel-MIC
+
+除非某个文件、目录或 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) 另有明确说明，SYSTEM-Intel-MIC 对 ElevenDE 的自主代码、配置、构建脚本、集成代码、壁纸和可授权资源，以 GNU General Public License version 3 or any later version（GPL-3.0-or-later）发布。GPL 正文见根目录 [`LICENSE`](LICENSE)。
+
+本项目包含原始 MIT 上游代码和第三方图标资源。它们的作者、版权和许可证不会因本 NOTICE 或根目录 GPL 而被重写。再发布时必须保留本文件、`LICENSE`、`LICENSES/` 和各文件现有的版权/许可证声明。
+
+特别是，Lindows 资源管理器基于 Explorer-for-Linux 的 MIT 原始代码，ElevenDE 对其新增改动以 GPL-3.0-or-later 发布；详细文件范围与义务见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。

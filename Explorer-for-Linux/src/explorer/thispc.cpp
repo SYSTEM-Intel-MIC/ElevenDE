@@ -2,6 +2,8 @@
 
 #include <QEnterEvent>
 #include <QGridLayout>
+#include <QFile>
+#include <QIcon>
 #include <QLabel>
 #include <QPainter>
 #include <QPainterPath>
@@ -20,7 +22,7 @@ public:
         , m_entry(entry)
         , m_hover(false)
     {
-        setFixedSize(170, 92);
+        setFixedSize(250, 132);
         setCursor(Qt::PointingHandCursor);
         setMouseTracking(true);
     }
@@ -51,16 +53,18 @@ protected:
         p.setRenderHint(QPainter::Antialiasing);
 
         QRectF cell = rect().adjusted(1, 1, -1, -1);
-        if (m_hover) {
-            p.setBrush(QColor(0, 120, 212, 24));
-            p.setPen(QPen(QColor(0, 120, 212, 120), 1));
-            p.drawRoundedRect(cell, 8, 8);
-        } else {
-            p.setPen(QPen(QColor(0, 0, 0, 18), 1));
-            p.drawRoundedRect(cell, 8, 8);
-        }
+        p.setBrush(m_hover ? QColor(0, 120, 212, 26) : QColor(255, 255, 255, 18));
+        p.setPen(QPen(m_hover ? QColor(0, 120, 212, 135) : QColor(0, 0, 0, 24), 1));
+        p.drawRoundedRect(cell, 10, 10);
 
-        QRectF iconRect(20, 10, 56, 44);
+        QRectF iconRect(22, 14, 64, 56);
+        const QString iconBase = QStringLiteral("/usr/local/share/elevende-shell/icons/");
+        const QString iconName = m_entry.mountPoint == QStringLiteral("/")
+            ? QStringLiteral("drive-windows.png") : QStringLiteral("drive.png");
+        const QString iconPath = iconBase + QStringLiteral("64x64/devices/") + iconName;
+        if (QFile::exists(iconPath)) {
+            p.drawPixmap(QRectF(22, 12, 60, 60).toRect(), QIcon(iconPath).pixmap(60, 60));
+        } else {
         QLinearGradient g(iconRect.topLeft(), iconRect.bottomRight());
         QColor steel(120, 140, 160);
         QColor steelLight(190, 205, 225);
@@ -84,12 +88,13 @@ protected:
         f.setBold(true);
         p.setFont(f);
         p.drawText(iconRect.adjusted(4, 6, -4, -4), Qt::AlignCenter, QString(m_entry.letter) + QLatin1Char(':'));
+        }
 
         QFont label = font();
         label.setPixelSize(11);
         p.setFont(label);
         p.setPen(palette().color(QPalette::WindowText));
-        p.drawText(QRect(0, 56, 170, 16), Qt::AlignCenter,
+        p.drawText(QRect(0, 82, 250, 17), Qt::AlignCenter,
                    QStringLiteral("本地磁盘 (%1:)").arg(m_entry.letter));
 
         QFont meta = font();
@@ -101,25 +106,31 @@ protected:
                   .arg(m_entry.availBytes / 1073741824.0, 0, 'f', 1)
                   .arg(m_entry.totalBytes / 1073741824.0, 0, 'f', 1)
             : QStringLiteral("容量未知");
-        p.drawText(QRect(0, 72, 170, 14), Qt::AlignCenter, sizeText);
+        p.drawText(QRect(0, 103, 250, 15), Qt::AlignCenter, sizeText);
     }
 
     void mousePressEvent(QMouseEvent *event) override
     {
+        /* Match Windows Explorer: a single click selects/highlights the drive;
+           navigation is performed only by the double-click handler below. */
         QWidget::mousePressEvent(event);
-        if (event->button() == Qt::LeftButton)
-            emit activated();
+        if (event->button() == Qt::LeftButton) {
+            m_selected = true;
+            update();
+        }
     }
 
     void mouseDoubleClickEvent(QMouseEvent *event) override
     {
         QWidget::mouseDoubleClickEvent(event);
-        emit activated();
+        if (event->button() == Qt::LeftButton)
+            emit activated();
     }
 
 private:
     DriveEntry m_entry;
     bool m_hover;
+    bool m_selected = false;
 };
 
 class ThisPcView::Grid : public QWidget
@@ -133,20 +144,20 @@ public:
         , m_flow(nullptr)
         , m_columns(4)
     {
+        setObjectName(QStringLiteral("ExplorerSurface"));
         auto *layout = new QVBoxLayout(this);
         layout->setContentsMargins(20, 12, 20, 12);
-        layout->setSpacing(6);
+        layout->setSpacing(8);
 
         m_section = new QLabel(this);
         m_section->setObjectName(QStringLiteral("ThisPcSection"));
         layout->addWidget(m_section);
 
-        auto *gridLabel = new QLabel(tr("本地磁盘"), this);
-        gridLabel->setObjectName(QStringLiteral("ThisPcSection"));
-        layout->addWidget(gridLabel);
-
+        /* Keep one Explorer-style section heading; the cards follow directly
+           below it instead of introducing a second expanding label row. */
         m_flow = new QWidget(this);
-        layout->addWidget(m_flow);
+        m_flow->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+        layout->addWidget(m_flow, 1);
 
         rebuild();
     }
@@ -160,7 +171,7 @@ public:
         }
         m_flowLayout = new QGridLayout(m_flow);
         m_flowLayout->setContentsMargins(0, 2, 0, 0);
-        m_flowLayout->setSpacing(6);
+        m_flowLayout->setSpacing(14);
         m_flowLayout->setAlignment(Qt::AlignLeft | Qt::AlignTop);
 
         int row = 0;
@@ -182,7 +193,7 @@ protected:
     void resizeEvent(QResizeEvent *event) override
     {
         QWidget::resizeEvent(event);
-        int cols = qMax(1, (width() - 12) / 176);
+        int cols = qMax(1, (width() - 12) / 264);
         if (cols != m_columns) {
             m_columns = cols;
             rebuild();
@@ -207,6 +218,7 @@ ThisPcView::ThisPcView(QWidget *parent)
     auto *outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 0, 0, 0);
     auto *scroll = new QScrollArea(this);
+    scroll->setObjectName(QStringLiteral("ExplorerSurface"));
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
     QList<DriveEntry> drives = detectDrives();

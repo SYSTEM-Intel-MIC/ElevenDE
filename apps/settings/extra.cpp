@@ -76,6 +76,7 @@ QWidget *xScroll(QWidget *inner)
 {
     auto *sa = new QScrollArea();
     sa->setWidgetResizable(true);
+    sa->setAlignment(Qt::AlignTop | Qt::AlignLeft);
     sa->setFrameShape(QFrame::NoFrame);
     sa->setWidget(inner);
     return sa;
@@ -110,24 +111,34 @@ public:
         m_pactl = haveCmd(QStringLiteral("pactl"));
 
         auto *outer = new QWidget();
+        outer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
         auto *v = new QVBoxLayout(outer);
-        v->setContentsMargins(32, 24, 32, 24);
-        v->setSpacing(12);
-        v->addWidget(xHeading(QStringLiteral("声音")));
+        v->setContentsMargins(32, 20, 32, 20);
+        v->setSpacing(8);
+        auto *heading = xHeading(QStringLiteral("声音"));
+        heading->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+        v->addWidget(heading);
 
         /* volume */
         auto *volBody = new QWidget();
         auto *vh = new QHBoxLayout(volBody);
         vh->setContentsMargins(0, 0, 0, 0);
+        vh->setSpacing(12);
         m_mute = new QCheckBox(QStringLiteral("静音"), volBody);
+        m_mute->setFixedWidth(70);
         m_vol = new QSlider(Qt::Horizontal, volBody);
         m_vol->setRange(0, 100);
+        m_vol->setTracking(true);
+        m_vol->setSingleStep(1);
+        m_vol->setPageStep(5);
         m_volLbl = new QLabel(QStringLiteral("--"), volBody);
         m_volLbl->setFixedWidth(48);
         vh->addWidget(m_mute);
         vh->addWidget(m_vol, 1);
         vh->addWidget(m_volLbl);
-        v->addWidget(xCard(QStringLiteral("主音量"), volBody));
+        auto *volumeCard = xCard(QStringLiteral("主音量"), volBody);
+        volumeCard->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        v->addWidget(volumeCard);
 
         /* output device */
         auto *outBody = new QWidget();
@@ -138,10 +149,20 @@ public:
         applyBtn->setProperty("accent", true);
         oh->addWidget(m_sink, 1);
         oh->addWidget(applyBtn);
-        v->addWidget(xCard(QStringLiteral("输出设备"), outBody,
-                           QStringLiteral("选择声音播放到哪里（pactl）")));
+        auto *outputCard = xCard(QStringLiteral("输出设备"), outBody,
+                                 QStringLiteral("选择声音播放到哪里（pactl）"));
+        outputCard->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        v->addWidget(outputCard);
+        v->addStretch(1);
 
-        QObject::connect(m_vol, &QSlider::valueChanged, this, &SoundPage::setVolume);
+        m_volumeTimer.setSingleShot(true);
+        QObject::connect(m_vol, &QSlider::valueChanged, this, [this](int value) {
+            m_volLbl->setText(QStringLiteral("%1%").arg(value));
+            m_volumeTimer.start(35);
+        });
+        QObject::connect(&m_volumeTimer, &QTimer::timeout, this, [this] {
+            setVolume(m_vol->value());
+        });
         QObject::connect(m_mute, &QCheckBox::toggled, this, &SoundPage::setMute);
         QObject::connect(applyBtn, &QPushButton::clicked, this, &SoundPage::applySink);
 
@@ -149,7 +170,7 @@ public:
 
         auto *lay = new QVBoxLayout(this);
         lay->setContentsMargins(0, 0, 0, 0);
-        lay->addWidget(xScroll(outer));
+        lay->addWidget(outer);
     }
 
 private:
@@ -243,6 +264,7 @@ private:
     QSlider *m_vol;
     QLabel *m_volLbl;
     QComboBox *m_sink;
+    QTimer m_volumeTimer;
 };
 
 /* ---------- 时间 ---------- */

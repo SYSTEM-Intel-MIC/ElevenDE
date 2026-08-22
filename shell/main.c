@@ -34,6 +34,7 @@
 #include <stdio.h>
 #include <ctype.h>
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -81,7 +82,7 @@ XftFont *f_bar, *f_small, *f_tile;
 XftDraw *xd_bar, *xd_menu, *xd_desk;
 
 Color cc_bar, cc_lo, cc_hi, cc_text, cc_sub, cc_task, cc_menu,
-      cc_accent, cc_search, cc_light, cc_logo1, cc_logo2, cc_logo3, cc_logo4,
+      cc_accent, cc_search, cc_light, cc_avatar, cc_logo1, cc_logo2, cc_logo3, cc_logo4,
       cc_selwash;
 
 static unsigned long gcol[48];
@@ -280,6 +281,7 @@ static int    refresh_tasks(void);
 static Pixmap icon_for_png(const char *name, int size, const Color *bg);
 static Pixmap icon_for_exact(const char *name, int size, const Color *bg);
 static Pixmap icon_for_task(Window w, int size);
+static void   icache_clear(void);
 static void   win_class(Window w, char *buf, int nbuf);
 static const char *app_icon_name(const char *cls);
 static void   draw_icon(Drawable dr, Pixmap pm, int size, int cx, int cy,
@@ -385,6 +387,23 @@ static Color make_color(const char *n) {
     return c;
 }
 
+static void set_popup_topmost(Window win) {
+    /* Override-redirect avoids window-manager decorations, but some compositors
+       still use EWMH metadata while calculating popup stacking. Mark the
+       Start panel as a real popup and above normal application clients. */
+    Atom typ = atom("_NET_WM_WINDOW_TYPE");
+    Atom popup = atom("_NET_WM_WINDOW_TYPE_POPUP_MENU");
+    Atom state = atom("_NET_WM_STATE");
+    Atom above = atom("_NET_WM_STATE_ABOVE");
+    Atom skip_taskbar = atom("_NET_WM_STATE_SKIP_TASKBAR");
+    Atom skip_pager = atom("_NET_WM_STATE_SKIP_PAGER");
+    Atom states[3] = { above, skip_taskbar, skip_pager };
+    XChangeProperty(dpy, win, typ, XA_ATOM, 32, PropModeReplace,
+                    (unsigned char *)&popup, 1);
+    XChangeProperty(dpy, win, state, XA_ATOM, 32, PropModeReplace,
+                    (unsigned char *)states, 3);
+}
+
 static Window mk_owindow(int x, int y, int w, int h) {
     XSetWindowAttributes sa;
     memset(&sa, 0, sizeof sa);
@@ -397,6 +416,13 @@ static Window mk_owindow(int x, int y, int w, int h) {
                                InputOutput, CopyFromParent,
                                CWOverrideRedirect | CWBackPixel |
                                CWBackingStore | CWEventMask, &sa);
+    /* The shell owns these override-redirect surfaces. Give the compositor a
+       stable class so it can exclude the full-screen desktop/bar from client
+       rounding; otherwise the transparent corners reveal the black X root. */
+    XClassHint hint;
+    hint.res_name = (char *)"elevende-shell";
+    hint.res_class = (char *)"ElevenDE";
+    XSetClassHint(dpy, win, &hint);
     return win;
 }
 
@@ -759,6 +785,16 @@ static void draw_power_symbol(Drawable dr, int cx, int cy, int s,
     XFlush(dpy);
 }
 
+/* compact lock fallback used only if the official Fluent asset is unavailable */
+static void draw_lock_icon(Drawable dr, int cx, int cy, int s, unsigned long fg) {
+    const int w = s * 3 / 5, h = s / 2, x = cx - w / 2, y = cy;
+    XSetForeground(dpy, bgc, fg);
+    XSetLineAttributes(dpy, bgc, 2, LineSolid, CapRound, JoinRound);
+    XDrawArc(dpy, dr, bgc, cx - s / 4, cy - s / 2, s / 2, s / 2, 180 * 64, 180 * 64);
+    XDrawRectangle(dpy, dr, bgc, x, y - 1, w, h);
+    XSetLineAttributes(dpy, bgc, 1, LineSolid, CapButt, JoinMiter);
+}
+
 /* ---------------------------------------------------------------- windows */
 static void set_wm_state(Window w) {
     Atom s = atom("_NET_WM_STATE");
@@ -1094,14 +1130,36 @@ static int refresh_tasks(void) {
     static Window  last_active = None;
 
     ntask = 0;
-    if (XGetWindowProperty(dpy, root, atom("_NET_CLIENT_LIST"), 0, 0x4000, False,
-                           XA_WINDOW, &type, &fmt, &nitems, &after, &prop) == Success &&
-        type != None && prop) {
+    int list_ok = (XGetWindowProperty(dpy, root, atom("_NET_CLIENT_LIST"),
+                                      0, 0x4000, False, XA_WINDOW,
+                                      &type, &fmt, &nitems, &after, &prop) == Success &&
+                   type != None && prop && nitems > 0);
+    /* Some Openbox sessions publish the stacking list before the normal
+       client list, or briefly leave the latter empty while clients map.
+       Use the EWMH stacking list as a deterministic fallback so taskbar
+       buttons never disappear merely because of startup ordering. */
+    if (!list_ok) {
+        if (prop) XFree(prop);
+        prop = NULL; type = None; fmt = 0; nitems = 0; after = 0;
+        list_ok = (XGetWindowProperty(dpy, root, atom("_NET_CLIENT_LIST_STACKING"),
+                                      0, 0x4000, False, XA_WINDOW,
+                                      &type, &fmt, &nitems, &after, &prop) == Success &&
+                   type != None && prop && nitems > 0);
+    }
+    if (list_ok) {
         Window *ws = (Window *)prop;
         Atom wm_type_desktop = atom("_NET_WM_WINDOW_TYPE_DESKTOP");
         for (unsigned long i = 0; i < nitems && ntask < MAX_TASKS; i++) {
             if (ws[i] == win_bar || ws[i] == win_menu || ws[i] == win_desk)
                 continue;
+            /* Openbox can briefly leave a destroyed XID in the EWMH list.
+               Do not create a black placeholder task for that dead window. */
+            XWindowAttributes wa;
+            if (!XGetWindowAttributes(dpy, ws[i], &wa))
+                continue;
+            /* Watch icon/title changes so a placeholder icon is replaced as
+               soon as Qt/GTK publishes its real _NET_WM_ICON. */
+            XSelectInput(dpy, ws[i], PropertyChangeMask | StructureNotifyMask);
             /* ignore desktop-type windows too (pagers/other desktops) */
             Atom tp = None;
             int tfmt = 0;
@@ -1140,6 +1198,10 @@ static int refresh_tasks(void) {
             if (tasks[i].win != last_wins[i]) { changed = 1; break; }
     static int first = 1;
     if (changed || first) {
+        /* Client windows can reuse XIDs after a close. Drop all task Pixmaps
+           whenever the client set changes so a relaunch cannot inherit an old
+           transparent or stale image. */
+        icache_clear();
         first = 0;
         last_ntask = ntask;
         last_active = g_active;
@@ -1227,9 +1289,23 @@ static Pixmap rgba_pm_from_src(unsigned char *px, int sw, int sh,
                               calloc(1, (size_t)size * size * 4), size, size,
                               32, 0);
     if (!im) { XFreePixmap(dpy, pm); return None; }
+    /* Preserve the source aspect ratio. Cropped _NET_WM_ICON frames are not
+       always square; scaling their bbox to a square made taskbar icons look
+       horizontally stretched. */
+    int dw = size, dh = size;
+    if (bw > bh) dh = (bh * size + bw / 2) / bw;
+    else if (bh > bw) dw = (bw * size + bh / 2) / bh;
+    if (dw < 1) dw = 1;
+    if (dh < 1) dh = 1;
+    const int ox = (size - dw) / 2, oy = (size - dh) / 2;
     for (int dy = 0; dy < size; dy++) {
         for (int dx = 0; dx < size; dx++) {
-            float u = (float)dx / (size - 1), v = (float)dy / (size - 1);
+            if (dx < ox || dx >= ox + dw || dy < oy || dy >= oy + dh) {
+                XPutPixel(im, dx, dy, vpx(bg->r, bg->g, bg->b));
+                continue;
+            }
+            float u = (float)(dx - ox) / (dw > 1 ? dw - 1 : 1);
+            float v = (float)(dy - oy) / (dh > 1 ? dh - 1 : 1);
             float sx = x0 + u * (bw - 1), sy = y0 + v * (bh - 1);
             int si = (int)sx, sj = (int)sy;
             float fx = sx - si, fy = sy - sj;
@@ -1333,7 +1409,14 @@ static Pixmap pixbuf_to_pm(const char *path, int size, const RGB3 *bg) {
                               calloc(1, (size_t)size * size * 4), size, size,
                               32, 0);
     if (!im) { XFreePixmap(dpy, pm); g_object_unref(pb); return None; }
-    GdkPixbuf *sc = gdk_pixbuf_scale_simple(pb, size, size,
+    /* Never force icons to a square: retain their aspect ratio and composite
+       the result into the square taskbar tile below. */
+    int target_w = size, target_h = size;
+    if (w > h) target_h = (h * size + w / 2) / w;
+    else if (h > w) target_w = (w * size + h / 2) / h;
+    if (target_w < 1) target_w = 1;
+    if (target_h < 1) target_h = 1;
+    GdkPixbuf *sc = gdk_pixbuf_scale_simple(pb, target_w, target_h,
                                             GDK_INTERP_BILINEAR);
     if (sc) { g_object_unref(pb); pb = sc; }
     w = gdk_pixbuf_get_width(pb); h = gdk_pixbuf_get_height(pb);
@@ -1376,8 +1459,23 @@ static int wallpaper_from_pixbuf(const char *path) {
         return 0;
     }
     int dw = scr_w, dh = scr_h - BAR_H;
-    GdkPixbuf *sc = gdk_pixbuf_scale_simple(pb, dw, dh, GDK_INTERP_BILINEAR);
+    if (dw <= 0 || dh <= 0) { g_object_unref(pb); return 0; }
+    /* Windows 11 desktop behavior: cover the whole desktop while preserving
+       aspect ratio, then center-crop the excess instead of stretching. */
+    const int ow = gdk_pixbuf_get_width(pb);
+    const int oh = gdk_pixbuf_get_height(pb);
+    const double cover = fmax((double)dw / (double)ow, (double)dh / (double)oh);
+    const int sw = (int)ceil((double)ow * cover);
+    const int sh = (int)ceil((double)oh * cover);
+    GdkPixbuf *sc = gdk_pixbuf_scale_simple(pb, sw, sh, GDK_INTERP_BILINEAR);
     if (sc) { g_object_unref(pb); pb = sc; }
+    if (gdk_pixbuf_get_width(pb) != dw || gdk_pixbuf_get_height(pb) != dh) {
+        const int cw = gdk_pixbuf_get_width(pb);
+        const int ch = gdk_pixbuf_get_height(pb);
+        GdkPixbuf *crop = gdk_pixbuf_new_subpixbuf(pb,
+            (cw - dw) / 2, (ch - dh) / 2, dw, dh);
+        if (crop) { g_object_unref(pb); pb = crop; }
+    }
     int w = gdk_pixbuf_get_width(pb), h = gdk_pixbuf_get_height(pb);
     int rs = gdk_pixbuf_get_rowstride(pb);
     int nch = gdk_pixbuf_get_n_channels(pb);
@@ -1638,7 +1736,10 @@ static const char *theme_find(const char *name, int size) {
     static char buf[512];
     static const char *cats[] = { "apps", "places", "devices", "mimetypes" };
     static const char *exts[] = { ".png", ".svg" };
-    int sizes[] = { size, size * 2, 48, 32, 24, 22, 64, 128, 96, 16, 256 };
+    /* Prefer a larger source and downsample it. The 24px ICO conversions
+       lose the Fluent silhouette at taskbar scale and can look like blank
+       blue bars; 48/32px sources retain the colored shape. */
+    int sizes[] = { size * 2, 48, 32, size, 64, 128, 96, 22, 16, 256 };
     /* ElevenDE's own Win11-style icon set always wins */
     for (int s2 = 0; s2 < 11 && sizes[s2] <= 512; s2++)
         for (unsigned c = 0; c < sizeof cats / sizeof cats[0]; c++)
@@ -1714,17 +1815,28 @@ typedef struct { char key[96]; Pixmap pm; } ICache;
 #define IC_MAX 128
 static ICache icache[IC_MAX];
 static int    nicache = 0;
-
+static void icache_clear(void);
 static Pixmap icache_find(const char *key) {
     for (int i = 0; i < nicache; i++)
         if (!strcmp(icache[i].key, key)) return icache[i].pm;
     return None;
 }
 static void icache_put(const char *key, Pixmap pm) {
-    if (nicache >= IC_MAX) { nicache = 0; }
+    if (nicache >= IC_MAX) {
+        /* Do not reset the index while leaving old server pixmaps allocated;
+           that aliases stale XIDs and causes intermittent black task icons. */
+        icache_clear();
+    }
     snprintf(icache[nicache].key, sizeof icache[nicache].key, "%s", key);
     icache[nicache].pm = pm;
     nicache++;
+}
+
+static void icache_clear(void) {
+    for (int i = 0; i < nicache; i++)
+        if (icache[i].pm) XFreePixmap(dpy, icache[i].pm);
+    memset(icache, 0, sizeof icache);
+    nicache = 0;
 }
 
 /*
@@ -1803,16 +1915,19 @@ static Pixmap neticon_pm(Window w, int size, const RGB3 *bg) {
 }
 
 static Pixmap icon_for_task(Window w, int size) {
-    char key[80];
-    snprintf(key, sizeof key, "W%lu@%d", (unsigned long)w, size);
+    /* Include WM_CLASS in the cache key. X11 window IDs are reusable; caching
+       by ID alone can make a newly launched app inherit a stale icon from a
+       previous task and is a common cause of intermittent black task buttons. */
+    char cls[64] = "";
+    win_class(w, cls, sizeof cls);
+    char key[160];
+    snprintf(key, sizeof key, "W%lu@%d@%s", (unsigned long)w, size, cls);
     Pixmap pm = icache_find(key);
     if (pm) return pm;
 
     /* Known ElevenDE apps must prefer the packaged Fluent-style image. Qt/GTK
        clients sometimes publish a transparent or all-black _NET_WM_ICON during
        startup; choosing it first is what caused blank taskbar buttons. */
-    char cls[64] = "";
-    win_class(w, cls, sizeof cls);
     if (cls[0]) pm = icon_for_exact(app_icon_name(cls), size, &cc_task);
     if (!pm) {
         RGB3 bg;
@@ -1879,17 +1994,42 @@ static void win_class(Window w, char *buf, int nbuf) {
 
 /* map common app classes to themed icon names */
 static const char *app_icon_name(const char *cls) {
+    /* Accept both WM_CLASS values and .desktop Exec strings. The latter may
+       contain an absolute path plus field codes, while the former is usually
+       already a bare lower-case resource name. */
+    static char normalized[128];
+    const char *key = cls ? cls : "";
+    snprintf(normalized, sizeof normalized, "%s", key);
+    char *sp = strpbrk(normalized, " \t");
+    if (sp) *sp = 0;
+    char *slash = strrchr(normalized, '/');
+    if (slash && slash[1]) key = slash + 1;
+    else key = normalized;
+
     static const struct { const char *cls, *icon; } tab[] = {
-        { "xterm",            "utilities-terminal-symbolic" },
-        { "urxvt",            "utilities-terminal-symbolic" },
-        { "konsole",          "utilities-terminal-symbolic" },
-        { "terminator",       "utilities-terminal-symbolic" },
-        { "gnome-terminal",   "utilities-terminal-symbolic" },
+        { "xterm",            "utilities-terminal" },
+        { "urxvt",            "utilities-terminal" },
+        { "konsole",          "utilities-terminal" },
+        { "terminator",       "utilities-terminal" },
+        { "gnome-terminal",   "utilities-terminal" },
+        { "xfce4-terminal",    "utilities-terminal" },
+        { "mate-terminal",     "utilities-terminal" },
+        { "kitty",             "utilities-terminal" },
+        { "alacritty",          "utilities-terminal" },
+        { "wezterm",           "utilities-terminal" },
+        { "org.gnome.terminal", "utilities-terminal" },
         { "elevende-calc",    "accessories-calculator" },
         { "elevende-settings", "preferences-system" },
         { "elevende-taskmgr", "utilities-system-monitor" },
         { "elevende-notepad", "accessories-text-editor" },
         { "elevende-photos",  "image-x-generic" },
+        { "org.gnome.systemmonitor", "utilities-system-monitor" },
+        { "gnome-system-monitor", "utilities-system-monitor" },
+        { "xfce4-taskmanager", "utilities-system-monitor" },
+        { "systemsettings",    "preferences-system" },
+        { "xfce4-settings",    "preferences-system" },
+        { "control-center",    "preferences-system" },
+        { "org.gnome.settings", "preferences-system" },
         { "explorer.exe",     "system-file-manager" },
         { "runbox",           "system-run" },
         { "firefox",          "firefox" },
@@ -1898,8 +2038,11 @@ static const char *app_icon_name(const char *cls) {
         { "google-chrome",    "chrome" },
         { "explorer",         "system-file-manager" },
         { "nautilus",         "system-file-manager" },
-        { "nemo",             "system-file-manager" },
-        { "thunar",           "system-file-manager" },
+                { "nemo",              "system-file-manager" },
+        { "pcmanfm",           "system-file-manager" },
+        { "dolphin",           "system-file-manager" },
+        { "caja",              "system-file-manager" },
+        { "thunar",            "system-file-manager" },
         { "gedit",            "accessories-text-editor" },
         { "kate",             "accessories-text-editor" },
         { "xed",              "accessories-text-editor" },
@@ -1919,8 +2062,26 @@ static const char *app_icon_name(const char *cls) {
         { "", "" }
     };
     for (int i = 0; tab[i].cls[0]; i++)
-        if (!strcmp(cls, tab[i].cls)) return tab[i].icon;
-    return cls;   /* fall back to raw class name as an icon name */
+        if (!strcmp(key, tab[i].cls)) return tab[i].icon;
+    /* Desktop files and GTK applications often publish a vendor-qualified
+       class (for example org.gnome.Nautilus). Match the known token without
+       ever overriding the exact first-party mappings above. */
+    static const struct { const char *token, *icon; } contains[] = {
+        { "terminal", "utilities-terminal" },
+        { "systemmonitor", "utilities-system-monitor" },
+        { "taskmanager", "utilities-system-monitor" },
+        { "settings", "preferences-system" },
+        { "calculator", "accessories-calculator" },
+        { "notepad", "accessories-text-editor" },
+        { "nautilus", "system-file-manager" },
+        { "pcmanfm", "system-file-manager" },
+        { "dolphin", "system-file-manager" },
+        { "thunar", "system-file-manager" },
+        { "", "" }
+    };
+    for (int i = 0; contains[i].token[0]; i++)
+        if (strstr(key, contains[i].token)) return contains[i].icon;
+    return key;   /* fall back to the normalized class/exec name */
 }
 
 /* class -> vector glyph used when no themed icon exists at all, so the
@@ -2137,23 +2298,48 @@ static void handle_cal_press(int x, int y) {
 }
 
 /* -------------------------------------------------------------- taskbar */
-static int task_total_w(void) { return ntask > 0 ? (46 + 3) * ntask : 0; }
+/* Compute one task-button geometry for both painting and hit testing. The
+ * old fixed 46px slot let a long client list extend underneath the right
+ * cluster, making later applications appear to vanish even with free space. */
+static void task_layout(int *x0_out, int *tw_out, int *gap_out) {
+    const int base = 42 + 8 + 150 + 8;
+    int gap = 3, tw = 46;
+    int right = clock_r.x > 0 ? clock_r.x - 12 : scr_w - 220;
+    int avail = right - 8 - base;
+    if (ntask > 0) {
+        int fit = (avail - (ntask - 1) * gap) / ntask;
+        if (fit < tw) tw = fit;
+        if (tw < 28) { tw = 28; gap = 2; }
+        if (tw > 46) tw = 46;
+    }
+    int total = ntask > 0 ? ntask * tw + (ntask - 1) * gap : 0;
+    int grp = base + total;
+    int x0 = (scr_w - grp) / 2;
+    if (x0 < 8) x0 = 8;
+    if (x0 + grp > right && ntask > 0) {
+        tw = (right - 8 - base - (ntask - 1) * gap) / ntask;
+        if (tw < 24) tw = 24;
+        total = ntask * tw + (ntask - 1) * gap;
+        grp = base + total;
+        x0 = (scr_w - grp) / 2;
+        if (x0 < 8) x0 = 8;
+    }
+    *x0_out = x0; *tw_out = tw; *gap_out = gap;
+}
 
 /* Win11-style: [start][search] + running apps sit centered as one cluster */
 static int left_cluster_x0(void) {
-    int grp = 42 + 8 + 150 + (ntask > 0 ? 8 + task_total_w() : 0);
-    int x0 = (scr_w - grp) / 2;
-    if (x0 < 8) x0 = 8;
-    int max = clock_r.x - 12 - grp;
-    if (x0 > max) x0 = max;
-    if (x0 < 8) x0 = 8;
+    int x0, tw, gap;
+    task_layout(&x0, &tw, &gap);
+    (void)tw; (void)gap;
     return x0;
 }
 
 static int bar_task_at(int x, int y) {
     if (ntask <= 0) return -1;
-    int tw = 46, th = 34, gap = 3;
-    int x0 = left_cluster_x0() + 50 + 150 + 8;
+    int tw, gap, th = 34, x0;
+    task_layout(&x0, &tw, &gap);
+    x0 += 50 + 150 + 8;
     int ty = (BAR_H - th) / 2;
     for (int i = 0; i < ntask; i++) {
         int bx = x0 + i * (tw + gap);
@@ -2531,8 +2717,9 @@ static void draw_taskbar(void) {
              search_r.x + 12, search_r.y + search_r.h / 2 + f_bar->ascent / 2 - 1,
              "搜索");
 
-    int tw = 46, th = 34, gap = 3;
-    int tx0 = x0 + 50 + 150 + 8;
+    int tw, th = 34, gap, tx0;
+    task_layout(&x0, &tw, &gap);
+    tx0 = x0 + 50 + 150 + 8;
     int ty = (BAR_H - th) / 2;
     for (int i = 0; i < ntask; i++) {
         int bx = tx0 + i * (tw + gap);
@@ -2543,23 +2730,31 @@ static void draw_taskbar(void) {
         unsigned long col = cc_task.pixel;
         if (i == bar_hover) col = cc_hoverc.pixel;
         fill_round(win_bar, bgc, bx, ty, tw, th, 4, col);
-        Pixmap pm = icon_for_task(tasks[i].win, 24);
+        /* Use a 36px source/render size inside the 42px Win11 task button.
+           This keeps the full Fluent silhouette visible on light surfaces;
+           24/32px versions can look like an empty blue tile. */
+        Pixmap pm = icon_for_task(tasks[i].win, 36);
         char cls[64] = "";
         if (!pm) {
             win_class(tasks[i].win, cls, sizeof cls);
             if (cls[0])
-                pm = icon_for_exact(app_icon_name(cls), 24, &cc_task);
+                pm = icon_for_exact(app_icon_name(cls), 36, &cc_task);
         }
         if (pm) {
-            draw_icon(win_bar, pm, 24, bx, ty - 1, tw, th);
+            int isz = tw < 36 ? tw - 4 : 36;
+            if (isz < 20) isz = 20;
+            draw_icon(win_bar, pm, isz, bx, ty - 1, tw, th);
         } else {
+            if (!cls[0]) win_class(tasks[i].win, cls, sizeof cls);
             draw_icon_kind(win_bar, app_icon_kind(cls), bx + tw / 2,
-                           ty + th / 2 - 1, 20, cc_light.pixel);
+                           ty + th / 2 - 1, 28, cc_accent.pixel);
         }
     }
 
     /* ---- right cluster: [tray icons][network][audio/battery][IME][clock][|desk] ---- */
-    net_r = (RRect){ pill_r.x + 4, pill_r.y, 26, pill_r.h };
+    net_r = (RRect){ pill_r.x + 56, pill_r.y, 26, pill_r.h };
+    /* Keep the compact native tray surface; the network segment remains a
+       separate full-height hit target so it can open the real WLAN panel. */
     if (in_rect(pill_r, pmx, pmy) && !in_rect(net_r, pmx, pmy))
         fill_round(win_bar, bgc, pill_r.x, pill_r.y, pill_r.w, pill_r.h,
                    8, cc_hoverc.pixel);
@@ -2567,21 +2762,27 @@ static void draw_taskbar(void) {
         fill_round(win_bar, bgc, net_r.x, net_r.y, net_r.w, net_r.h,
                    8, cc_hoverc.pixel);
     int ic_y = BAR_H / 2;
-    int slot = pill_r.x + 4;
-    const int SLOT_W = 26;
-    if (net_type == 1)      draw_wifi_glyph(win_bar, slot + SLOT_W / 2, ic_y, 18,
-                                            cc_text.pixel, 3);
-    else if (net_type == 2) draw_wired_glyph(win_bar, slot + SLOT_W / 2, ic_y, 16,
-                                             cc_text.pixel);
-    else                    draw_wifi_glyph(win_bar, slot + SLOT_W / 2, ic_y, 18,
-                                            cc_sub.pixel, 0);
-    slot += SLOT_W;
-    draw_vol_glyph(win_bar, slot + SLOT_W / 2, ic_y, 18, cc_text.pixel,
-                   vol_level, vol_muted);
-    slot += SLOT_W;
-    if (bat_present)
-        draw_bat_glyph(win_bar, slot + SLOT_W / 2, ic_y, 16, cc_text.pixel,
-                       bat_level, bat_charging);
+    int slot = pill_r.x + 5;
+    const int SLOT_W = 24;
+    /* Use packaged WindowsIcons PNGs for every tray pictogram. The Shell no
+       longer draws substitute line glyphs, so the tray shares the same asset
+       language as the desktop, Start menu and titlebars. */
+    const Color *tray_bg = &cc_bar;
+    const char *tray_names[] = {
+        net_type == 2 ? "tray-wired" : (net_type == 1 ? "tray-network" : "tray-network-off"),
+        vol_muted ? "tray-volume-muted" : "tray-volume",
+        bat_charging ? "tray-battery-charge" : "tray-battery"
+    };
+    for (int ti = 0; ti < 3; ti++) {
+        if (ti == 2 && !bat_present) { slot += SLOT_W; continue; }
+        /* These aliases are staged from Microsoft's Fluent System Icons. The
+           Shell only chooses the current state; it never draws a substitute
+           glyph or stretches an ICO. */
+        Pixmap tray_pm = icon_for_exact(tray_names[ti], 20, tray_bg);
+        if (tray_pm)
+            draw_icon(win_bar, tray_pm, 20, slot + 2, ic_y - 10, SLOT_W - 4, 20);
+        slot += SLOT_W;
+    }
 
     /* input method indicator (Win11 中/ENG), left of the clock */
     if (in_rect(im_r, pmx, pmy))
@@ -2670,8 +2871,21 @@ static void paint_desktop(void) {
                       0xFFFFFF, 36, 10);
         const char *nm = ic[i].is_dir ? "folder" : file_icon_name(ic[i].label);
         int kind = ic[i].is_dir ? VI_FOLDER : VI_FILE;
-        if (i == 0) { nm = "computer";               kind = VI_PC; }
-        else if (i == 1) { nm = "user-home";         kind = VI_HOME; }
+        /* Desktop entries use explicit WindowsIcons names instead of one
+           generic folder for every directory.  This keeps This PC, Home,
+           local drives and known folders visually consistent with Start. */
+        if (i == 0) { nm = "desktop-this-pc"; kind = VI_PC; }
+        else if (i == 1) { nm = "desktop-home"; kind = VI_HOME; }
+        else if (ic[i].is_dir && (strstr(ic[i].label, "磁盘") ||
+                                  strstr(ic[i].label, "本地"))) {
+            nm = "drive-windows"; kind = VI_DRIVE;
+        } else if (ic[i].is_dir && strstr(ic[i].label, "下载")) {
+            nm = "downloads";
+        } else if (ic[i].is_dir && strstr(ic[i].label, "文档")) {
+            nm = "documents";
+        } else if (ic[i].is_dir && strstr(ic[i].label, "图片")) {
+            nm = "pictures";
+        }
         /* true-alpha rendering over the wallpaper (no opaque icon boxes) */
         const char *ipath = theme_find(nm, 64);
         IconRGBA *ib = ipath ? icon_rgba_for_path(ipath, 64) : NULL;
@@ -2714,6 +2928,10 @@ static Window mk_desktop_window(int w, int h) {
     XChangeProperty(dpy, d, atom("_NET_WM_STATE"), XA_ATOM, 32,
                     PropModeReplace, (unsigned char *)&below, 1);
     XStoreName(dpy, d, "ElevenDE Desktop");
+    XClassHint hint;
+    hint.res_name = (char *)"elevende-shell";
+    hint.res_class = (char *)"ElevenDE";
+    XSetClassHint(dpy, d, &hint);
     XSetWMProtocols(dpy, d, NULL, 0);
     return d;
 }
@@ -3137,23 +3355,18 @@ typedef struct {
     int  kind;                /* guaranteed vector-gloss fallback */
 } Pinned;
 static const Pinned pins_def[6] = {
-    { "文件管理器", "explorer.exe", "#2f6db1",
-      { "system-file-manager", "org.gnome.Nautilus", "nautilus", "folder",
-        "drive-harddisk", "" }, VI_PC },
+    { "文件资源管理器", "explorer.exe", "#f2b233",
+      { "system-file-manager", "folder", "computer", "drive-windows", "", "" }, VI_PC },
     { "终端", "xterm", "#4b5563",
-      { "utilities-terminal", "xterm", "org.gnome.Terminal",
-        "applications-utilities", "", "" }, VI_TERM },
-    { "浏览器", "x-www-browser", "#f07822",
-      { "web-browser", "firefox", "chromium", "www-browser",
-        "internet-web-browser", "" }, VI_BROWSER },
-    { "记事本", "elevende-notepad", "#6b7280",
-      { "accessories-text-editor", "text-editor", "text-x-generic",
-        "", "", "" }, VI_EDITOR },
-    { "设置", "elevende-settings", "#8a8f98",
-      { "preferences-system", "org.gnome.Settings", "gnome-control-center",
-        "setup", "", "" }, VI_SETTINGS },
-    { "主目录", "xdg-open $HOME", "#7c6fb2",
-      { "user-home", "folder-home", "go-home", "home", "", "" }, VI_HOME },
+      { "utilities-terminal", "xterm", "org.gnome.Terminal", "applications-utilities", "", "" }, VI_TERM },
+    { "记事本", "elevende-notepad", "#1d9bbf",
+      { "accessories-text-editor", "text-editor", "text-x-generic", "documents", "", "" }, VI_EDITOR },
+    { "设置", "elevende-settings", "#6b7280",
+      { "preferences-system", "computer", "settings", "setup", "", "" }, VI_SETTINGS },
+    { "计算器", "elevende-calc", "#287fc4",
+      { "accessories-calculator", "calculator", "office-calculator", "", "", "" }, VI_FILE },
+    { "任务管理器", "elevende-taskmgr", "#287fc4",
+      { "utilities-system-monitor", "system-monitor", "system-run", "computer", "", "" }, VI_FILE },
 };
 static Pinned pins[NPIN_MAX];
 static int    pin_visible[NPIN_MAX];
@@ -3326,8 +3539,8 @@ static RRect cur_list_rect(void) {
 
 static int list_rows_vis(void) { return cur_list_rect().h / ROW_H; }
 
-/* 6-wide x 2-row compact pinned grid; 12 pins fill two Win11-sized rows and
-   the "所有应用" list always sits at the fixed top */
+/* 6-wide compact pinned grid; the reference image contributes layout and
+   visual hierarchy only, while entries remain real Lindows applications. */
 static int list_top_pins(void) { return LIST_TOP_PINNED; }
 
 static void power_hide(void) {
@@ -3350,7 +3563,7 @@ static void menu_hide(void) {
     tile_anim_act = 0;
 }
 
-#define POWER_W   200
+#define POWER_W   220
 #define POWER_ROW 40
 #define POWER_H   (12 + 4 * POWER_ROW)
 
@@ -3387,7 +3600,7 @@ static void show_power(void) {
 static void draw_moon(Drawable dr, int cx, int cy, int s, unsigned long fg) {
     XSetForeground(dpy, bgc, fg);
     XFillArc(dpy, dr, bgc, cx - s / 2, cy - s / 2, s, s, 0, 360 * 64);
-    XSetForeground(dpy, bgc, cc_menu.pixel);
+    XSetForeground(dpy, bgc, px2("#fbfcfe"));
     XFillArc(dpy, dr, bgc, cx - s / 2 + s / 3, cy - s / 2 - s / 6, s, s, 0, 360 * 64);
 }
 
@@ -3427,36 +3640,46 @@ static void draw_logout_icon(Drawable dr, int cx, int cy, int s, unsigned long f
 
 static void draw_power(void) {
     if (!win_power) return;
-    /* same look as the SAS secure-screen power menu:
-     * dark blue card rgba(24,32,48), 1px light border, 8px radius,
-     * 40px rows with rgba(255,255,255,12%) hover */
-    fill_round(win_power, bgc, 0, 0, POWER_W, POWER_H, 8, px2("#182030"));
-    XSetForeground(dpy, bgc, px2("#3b4251"));
+    /* Start-menu flyout follows the same light Windows 11 surface as the
+     * panel itself, never the dark SAS secure-screen palette. */
+    /* Match the Start menu's Mica surface instead of a flat white panel. */
+    fill_round(win_power, bgc, 0, 0, POWER_W, POWER_H, 10, cc_menu.pixel);
+    XSetForeground(dpy, bgc, px2("#d8dde6"));
     XSetLineAttributes(dpy, bgc, 1, LineSolid, CapButt, JoinMiter);
     XDrawRectangle(dpy, win_power, bgc, 0, 0, POWER_W - 1, POWER_H - 1);
-    static const char *items[4] = { "睡眠", "关机", "重启", "注销" };
+    static const char *items[4] = { "锁定", "睡眠", "关机", "重启" };
     for (int i = 0; i < 4; i++) {
         const int row_y = 6 + i * POWER_ROW, row_h = POWER_ROW;
         if (power_hover == i)
-            fill_round(win_power, bgc, 6, row_y, POWER_W - 12, row_h - 2, 6,
-                       px2("#333b49"));
-        const int gcx = 30, gcy = row_y + row_h / 2;
-        if      (i == 0) draw_moon(win_power, gcx, gcy, 18, cc_text.pixel);
-        else if (i == 1) draw_power_symbol(win_power, gcx, gcy, 18, cc_text.pixel);
-        else if (i == 2) draw_restart_icon(win_power, gcx, gcy, 18, cc_text.pixel);
-        else             draw_logout_icon(win_power, gcx, gcy, 18, cc_text.pixel);
+            fill_round(win_power, bgc, 8, row_y, POWER_W - 16, row_h - 2, 7,
+                       cc_hoverc.pixel);
+        const unsigned long fg = cc_text.pixel;
+        /* Keep every glyph inside a 24px safe box so arrowheads and arcs are
+           never clipped by the popup surface or compositor. */
+        const int gcx = 34, gcy = row_y + row_h / 2;
+        const char *power_alias = i == 0 ? "fluent-power-lock" :
+                                  (i == 1 ? "fluent-power-sleep" :
+                                   (i == 2 ? "fluent-power-shutdown" : "fluent-power-restart"));
+        Pixmap power_pm = icon_for_exact(power_alias, 20, &cc_menu);
+        if (power_pm)
+            draw_icon(win_power, power_pm, 20, gcx - 10, gcy - 10, 20, 20);
+        else if (i == 0) draw_lock_icon(win_power, gcx, gcy, 16, fg);
+        else if (i == 1) draw_moon(win_power, gcx, gcy, 16, fg);
+        else if (i == 2) draw_power_symbol(win_power, gcx, gcy, 16, fg);
+        else draw_restart_icon(win_power, gcx, gcy, 16, fg);
         const int base_y = row_y + (row_h + f_small->ascent - f_small->descent) / 2;
-        draw_str(win_power, xd_power, f_small, &cc_text, 52, base_y, items[i]);
+        Color lightPowerText = make_color("#20232a");
+        draw_str(win_power, xd_power, f_small, &lightPowerText, 60, base_y, items[i]);
     }
 }
 
 static void handle_power_press(int x, int y) {
     for (int i = 0; i < npower_hot; i++)
         if (in_rect(power_hot[i], x, y)) {
-            if      (i == 0) { launch_cmd("systemctl suspend");  menu_hide(); }
-            else if (i == 1) { launch_cmd("systemctl poweroff"); menu_hide(); }
-            else if (i == 2) { launch_cmd("systemctl reboot");   menu_hide(); }
-            else if (i == 3) { launch_cmd("openbox --exit");     menu_hide(); }
+            if      (i == 0) { launch_cmd("elevende-lock");     menu_hide(); }
+            else if (i == 1) { launch_cmd("systemctl suspend");  menu_hide(); }
+            else if (i == 2) { launch_cmd("systemctl poweroff"); menu_hide(); }
+            else if (i == 3) { launch_cmd("systemctl reboot");   menu_hide(); }
             return;
         }
     power_hide();
@@ -3818,7 +4041,9 @@ static void menu_show(void) {
      * hover geometry stays exact while the window itself moves. */
     int y0 = menu_y + 70;
     XMoveResizeWindow(dpy, win_menu, menu_x, y0, MENU_W, MENU_H);
+    set_popup_topmost(win_menu);
     XMapRaised(dpy, win_menu);
+    XRaiseWindow(dpy, win_menu);
     XSetInputFocus(dpy, win_menu, RevertToPointerRoot, CurrentTime);
     menu_open_act = g_active;
     menu_visible = 1;
@@ -3894,6 +4119,7 @@ static void draw_menu(void) {
         draw_menu_list("搜索结果", &r);
     } else {
         draw_str(win_menu, xd_menu, f_small, &cc_sub, 32, 82, "已固定");
+        draw_str(win_menu, xd_menu, f_small, &cc_text, MENU_W - 124, 82, "所有应用  >");
         if (npin_tiles == 0)
             draw_str(win_menu, xd_menu, f_small, &cc_sub, 32, 116,
                      "没有固定项（右键任意应用可固定）");
@@ -3929,14 +4155,31 @@ static void draw_menu(void) {
         draw_menu_list("所有应用", &list_r);
     }
 
+    /* Account row: use the same official Fluent default user glyph as the
+       login page, precomposited over its own deep-blue round base. */
+    const int avatar_size = 24, avatar_box = 32;
+    const int avatar_x = 36, avatar_y = MENU_H - 56;
+    fill_round(win_menu, bgc, avatar_x, avatar_y, avatar_box, avatar_box,
+               avatar_box / 2, cc_avatar.pixel);
+    Pixmap menu_avatar_pm = icon_for_exact("login-user-avatar", avatar_size, &cc_avatar);
+    if (menu_avatar_pm)
+        draw_icon(win_menu, menu_avatar_pm, avatar_size, avatar_x, avatar_y,
+                  avatar_box, avatar_box);
     char who[64];
     snprintf(who, sizeof who, "%s", getenv("USER") ? getenv("USER") : "user");
-    draw_str(win_menu, xd_menu, f_small, &cc_text, 32, MENU_H - 40, who);
+    draw_str(win_menu, xd_menu, f_small, &cc_text, 76, MENU_H - 40, who);
     /* Win11-style circular power button */
     if (menu_power_hover)
         fill_round(win_menu, bgc, MENU_W - 72, MENU_H - 62, 44, 44, 22,
                    cc_hoverc.pixel);
-    draw_power_symbol(win_menu, MENU_W - 50, MENU_H - 40, 20, cc_text.pixel);
+    /* icon_for_exact precomposites alpha into the supplied background.  The
+       Start menu power glyph sits on cc_menu; using cc_text here turned every
+       transparent pixel into a dark 22px square. */
+    Pixmap menu_power_pm = icon_for_exact("fluent-power-start", 22, &cc_menu);
+    if (menu_power_pm)
+        draw_icon(win_menu, menu_power_pm, 22, MENU_W - 61, MENU_H - 51, 22, 22);
+    else
+        draw_power_symbol(win_menu, MENU_W - 50, MENU_H - 40, 20, cc_text.pixel);
 }
 
 /* ----------------------------------------------------------- dispatch */
@@ -4378,6 +4621,32 @@ static int xerr(struct _XDisplay *d, XErrorEvent *e) {
     return 0;
 }
 
+/* Reflow every screen-sized surface after RandR. Some X servers emit a
+ * root ConfigureNotify, while others only update DisplayWidth/Height; the
+ * main loop calls this both from the event path and from a cheap size poll. */
+static void shell_reflow(int nw, int nh) {
+    if (nw <= 0 || nh <= BAR_H || (nw == scr_w && nh == scr_h)) return;
+    scr_w = nw;
+    scr_h = nh;
+    XMoveResizeWindow(dpy, win_desk, 0, 0, scr_w, scr_h - BAR_H);
+    XMoveResizeWindow(dpy, win_bar, 0, scr_h - BAR_H, scr_w, BAR_H);
+    edge_r = (RRect){ scr_w - 9, 0, 9, BAR_H };
+    clock_r = (RRect){ scr_w - 9 - 86, 0, 82, BAR_H };
+    im_r = (RRect){ clock_r.x - 4 - 36, (BAR_H - 36) / 2, 36, 36 };
+    pill_r = (RRect){ im_r.x - 4 - 106, (BAR_H - 36) / 2, 106, 36 };
+    net_r = (RRect){ pill_r.x + 56, pill_r.y, 26, pill_r.h };
+    menu_hide();
+    search_hide();
+    cal_hide();
+    vol_hide();
+    wall_ok = 0;
+    wallpaper_init();
+    icon_layout();
+    tray_layout();
+    desk_dirty = 1;
+    bar_dirty = 1;
+}
+
 int main(void) {
     signal(SIGCHLD, SIG_IGN);
     signal(SIGHUP, SIG_IGN);
@@ -4395,23 +4664,31 @@ int main(void) {
     /* the shell is a self-contained desktop: disable the legacy X screen
        saver so the desktop can never blank unexpectedly; idle/power blanking
        is the DE's own policy, not the X server's */
-    XSetScreenSaver(dpy, 0, 0, 0, 0);
-
-    cc_bar     = make_color("#1a1f2b");
-    cc_lo      = make_color("#10406e");
-    cc_hi      = make_color("#1b5c96");
-    cc_text    = make_color("#ececec");
-    cc_sub     = make_color("#9aa4ab");
-    cc_task    = make_color("#2b3240");
-    cc_menu    = make_color("#17191f");
-    cc_accent  = make_color("#0f6cbd");
-    cc_search  = make_color("#333333");
-    cc_light   = make_color("#e8e8e8");
-    cc_hoverc  = make_color("#3c5a99");
-    cc_sel     = make_color("#3c5a99");
-    cc_selwash = make_color("#2b3a66");
-    cc_logo1   = make_color("#4da6ff");
-    cc_logo2   = make_color("#6fd08c");
+        XSetScreenSaver(dpy, 0, 0, 0, 0);
+    /* Watch EWMH root properties so task buttons update as soon as Openbox
+       publishes a new client list or active window, instead of waiting for
+       the one-second polling interval. */
+    XSelectInput(dpy, root, PropertyChangeMask | StructureNotifyMask);
+    /* Windows 11 light taskbar palette. Icon pixmaps are composited over
+       cc_task, so this must not be pure white: white portions of third-party
+       icons would disappear and the taskbar would look like blank tiles. */
+    cc_bar     = make_color("#f3f3f3");
+    cc_lo      = make_color("#d7e8f7");
+    cc_hi      = make_color("#ffffff");
+    cc_text    = make_color("#202020");
+    cc_sub     = make_color("#666666");
+    cc_task    = make_color("#e6eef7");
+    cc_menu    = make_color("#f3f8fe");
+    cc_accent  = make_color("#0067c0");
+    cc_search  = make_color("#ffffff");
+    cc_light   = make_color("#202020");
+    /* Deep-blue background used only for the official account avatar. */
+    cc_avatar  = make_color("#2b3a69");
+    cc_hoverc  = make_color("#e4f1fc");
+    cc_sel     = make_color("#cfe7fb");
+    cc_selwash = make_color("#e7f3fc");
+    cc_logo1   = make_color("#0078d4");
+    cc_logo2   = make_color("#00a4ef");
     cc_logo3   = make_color("#f2a53c");
     cc_logo4   = make_color("#f26b6b");
     for (int i = 0; i < NPIN_MAX; i++) pin_colors[i] = make_color("#8a8f98");
@@ -4450,10 +4727,10 @@ int main(void) {
     start_r  = (RRect){ 8,    (BAR_H - 36) / 2, 42, 36 };
     search_r = (RRect){ 58,   (BAR_H - 36) / 2, 150, 36 };
     edge_r   = (RRect){ scr_w - 9, 0, 9, BAR_H };
-    clock_r  = (RRect){ scr_w - 9 - 92, 0, 88, BAR_H };
-    im_r     = (RRect){ clock_r.x - 4 - 44, (BAR_H - 36) / 2, 44, 36 };
-    pill_r   = (RRect){ im_r.x - 4 - 82, (BAR_H - 36) / 2, 82, 36 };
-    net_r    = (RRect){ pill_r.x + 4, pill_r.y, 26, pill_r.h };
+    clock_r  = (RRect){ scr_w - 9 - 86, 0, 82, BAR_H };
+    im_r     = (RRect){ clock_r.x - 4 - 36, (BAR_H - 36) / 2, 36, 36 };
+    pill_r   = (RRect){ im_r.x - 4 - 106, (BAR_H - 36) / 2, 106, 36 };
+    net_r    = (RRect){ pill_r.x + 56, pill_r.y, 26, pill_r.h };
 
     win_menu = mk_owindow(0, 0, MENU_W, MENU_H);
     xd_menu  = XftDrawCreate(dpy, win_menu, vis, cmap);
@@ -4493,6 +4770,11 @@ int main(void) {
 
     XMapRaised(dpy, win_desk);
     XMapRaised(dpy, win_bar);
+    /* Paint synchronously after mapping.  With override-redirect windows the
+       first Expose can arrive before the rest of the desktop is ready; a
+       forced initial pass prevents a blank white taskbar in fresh sessions. */
+    draw_taskbar();
+    XRaiseWindow(dpy, win_bar);
     XFlush(dpy);
 
     k_win1 = XKeysymToKeycode(dpy, XK_Super_L);
@@ -4536,6 +4818,14 @@ int main(void) {
                 else if (ev.xexpose.window == win_cal) draw_cal();
                 else if (ev.xexpose.window == win_vol) draw_vol_flyout();
                 break;
+            case ConfigureNotify:
+                if (ev.xconfigure.window == root &&
+                    (ev.xconfigure.width != scr_w || ev.xconfigure.height != scr_h)) {
+                    shell_reflow(ev.xconfigure.width, ev.xconfigure.height);
+                    dirty = 1;
+                    act_changed = 1;
+                }
+                break;
             case ClientMessage:
                 if (tray_ok && ev.xclient.message_type ==
                               atom("_NET_SYSTEM_TRAY_OPCODE") &&
@@ -4543,9 +4833,9 @@ int main(void) {
                     tray_dock((Window)ev.xclient.data.l[2]);
                 else if (ev.xclient.message_type ==
                          atom("_ELEVENDE_RELOAD_WALLPAPER")) {
-                    /* the Settings app switched the wallpaper: re-read
-                     * ~/.local/share/elevende/wallpaper.png (or the system
-                     * fallback) and repaint the desktop next pass. */
+                    /* The Settings app switched the wallpaper: the file has
+                     * already been atomically renamed, so load it immediately
+                     * and repaint on the next desktop pass. */
                     wall_ok = 0;
                     wallpaper_init();
                     desk_dirty = 1;
@@ -4553,12 +4843,45 @@ int main(void) {
                 break;
             case MapNotify:
                 /* 外部窗口映射只由 Openbox 负责；Shell 不改变任何输入状态。 */
+                dirty = 1;
+                break;
+            case PropertyNotify:
+                if (ev.xproperty.window == root &&
+                    ev.xproperty.atom == atom("_ELEVENDE_WALLPAPER_SERIAL")) {
+                    /* Reliable companion to the ClientMessage sent by
+                     * Settings after each atomic wallpaper replacement. */
+                    wall_ok = 0;
+                    wallpaper_init();
+                    desk_dirty = 1;
+                } else if (ev.xproperty.window == root &&
+                    (ev.xproperty.atom == atom("_NET_CLIENT_LIST") ||
+                     ev.xproperty.atom == atom("_NET_CLIENT_LIST_STACKING") ||
+                     ev.xproperty.atom == atom("_NET_ACTIVE_WINDOW"))) {
+                    /* Rebuild immediately: waiting for the periodic poll
+                       leaves a destroyed task button painted as a black icon. */
+                    int ch = refresh_tasks();
+                    dirty = 1;
+                    if (ch) { act_changed = 1; cancel_repeat = 12; }
+                } else if (ev.xproperty.atom == atom("_NET_WM_ICON") ||
+                           ev.xproperty.atom == atom("WM_CLASS") ||
+                           ev.xproperty.atom == atom("_NET_WM_NAME") ||
+                           ev.xproperty.atom == atom("WM_NAME")) {
+                    /* The task remains, but its cached pixmap is stale. */
+                    icache_clear();
+                    dirty = 1;
+                }
                 break;
             case DestroyNotify:
                 for (int i = 0; i < ntray; i++)
                     if (tray_wins[i] == ev.xdestroywindow.window)
                         tray_remove(ev.xdestroywindow.window);
-                /* 销毁外部窗口不能触发合成输入或窗口管理器命令。 */
+                /* 销毁外部窗口不能触发合成输入或窗口管理器命令；刷新
+                   now so the task button disappears in the same event pass. */
+                {
+                    int ch = refresh_tasks();
+                    dirty = 1;
+                    if (ch) { act_changed = 1; cancel_repeat = 12; }
+                }
                 break;
             case UnmapNotify:
                 if (ev.xunmap.window == win_cal) cal_visible = 0;
@@ -4842,6 +5165,17 @@ int main(void) {
                 }
                 break;
             }
+        }
+
+        /* A few Xvfb/driver combinations update the root geometry without
+           delivering ConfigureNotify. Poll the live screen size as a fallback
+           so the DE never remains laid out for the old resolution. */
+        const int live_w = DisplayWidth(dpy, scr);
+        const int live_h = DisplayHeight(dpy, scr);
+        if (live_w != scr_w || live_h != scr_h) {
+            shell_reflow(live_w, live_h);
+            dirty = 1;
+            act_changed = 1;
         }
 
         /* 不在后台注入鼠标释放或反复发送 moveresize-cancel。旧的“幽灵

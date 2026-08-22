@@ -190,8 +190,11 @@ static void do_run(void)
         return;
     }
 
-    gboolean as_root = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g_chk_root));
-    gboolean in_term = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g_chk_term));
+    /* The Windows 11 Run surface has no extra switches. Keep these optional
+       execution modes disabled unless an embedding caller explicitly adds
+       controls in the future. */
+    gboolean as_root = g_chk_root && gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g_chk_root));
+    gboolean in_term = g_chk_term && gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g_chk_term));
 
     /* 1) Windows 常用命令别名 */
     gchar *resolved = NULL;
@@ -302,21 +305,15 @@ static void do_run(void)
 /* ---------------- 界面 ---------------- */
 
 static const gchar *CSS =
-    "window.runbox { background-color: #f0f0f0; }"
-    ".runbox-titlebar { background-color: #ffffff; border-bottom: 1px solid #e3e3e3;"
-    "  box-shadow: none; min-height: 30px; }"
-    ".runbox-titlebar label { color: #111111; font-weight: normal; }"
-    ".runbox-titlebar button { border: none; box-shadow: none; background: transparent;"
-    "  border-radius: 0; min-width: 40px; }"
-    ".runbox-titlebar button:hover { background: #e5e5e5; }"
-    "window.runbox button { border-radius: 2px; padding: 4px 10px; }"
-    "window.runbox button.runbox-ok { background: #0078d7; border-color: #0078d7;"
-    "  color: #ffffff; }"
-    "window.runbox button.runbox-ok:hover { background: #1a86dc; }"
-    "window.runbox button.runbox-ok:active { background: #006cbe; }"
-    "window.runbox combobox entry { background: #ffffff; border: 1px solid #7a7a7a;"
-    "  border-radius: 0; box-shadow: none; }"
-    "window.runbox combobox entry:focus { border-color: #0078d7; }";
+    "window.runbox { background-color: #f4f4f4; }"
+    "window.runbox box { color: #1f1f1f; }"
+    "window.runbox button { background: #fbfbfb; color: #1f1f1f; border: 1px solid #c9c9c9;"
+    " border-radius: 4px; min-height: 30px; padding: 2px 16px; box-shadow: none; }"
+    "window.runbox button:hover { background: #f0f6fc; border-color: #0078d4; }"
+    "window.runbox button.runbox-ok { border-color: #0078d4; }"
+    "window.runbox combobox entry { background: #ffffff; border: 1px solid #8c8c8c;"
+    " border-radius: 2px; min-height: 27px; box-shadow: none; }"
+    "window.runbox combobox entry:focus { border-color: #0078d4; box-shadow: 0 0 0 1px #0078d4; }";
 
 static void on_browse(GtkButton *btn, gpointer user)
 {
@@ -361,12 +358,16 @@ static void build_ui(void)
 {
     g_window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(g_window), "运行");
-    gtk_window_set_icon_name(GTK_WINDOW(g_window), "runbox");
-    gtk_window_set_default_icon_name("system-run");
+    const gchar *run_icon = "/usr/local/share/elevende-shell/icons/48x48/apps/system-run.png";
+    GError *icon_error = NULL;
+    if (!gtk_window_set_icon_from_file(GTK_WINDOW(g_window), run_icon, &icon_error)) {
+        if (icon_error) g_error_free(icon_error);
+        gtk_window_set_icon_name(GTK_WINDOW(g_window), "system-run");
+    }
     gtk_window_set_resizable(GTK_WINDOW(g_window), FALSE);
     gtk_window_set_position(GTK_WINDOW(g_window), GTK_WIN_POS_CENTER);
     gtk_window_set_keep_above(GTK_WINDOW(g_window), TRUE);
-    gtk_window_set_default_size(GTK_WINDOW(g_window), 480, -1);
+    gtk_window_set_default_size(GTK_WINDOW(g_window), 505, 238);
     g_signal_connect(g_window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
     g_signal_connect(g_window, "key-press-event", G_CALLBACK(on_key), NULL);
 
@@ -383,13 +384,13 @@ static void build_ui(void)
     gtk_grid_set_row_spacing(GTK_GRID(grid), 12);
     gtk_grid_set_column_spacing(GTK_GRID(grid), 12);
 
-    GtkWidget *icon = gtk_image_new_from_icon_name("system-run", GTK_ICON_SIZE_DIALOG);
+    GtkWidget *icon = gtk_image_new_from_file("/usr/local/share/elevende-shell/icons/48x48/apps/system-run.png");
     gtk_image_set_pixel_size(GTK_IMAGE(icon), 36);
     gtk_widget_set_valign(icon, GTK_ALIGN_START);
     gtk_grid_attach(GTK_GRID(grid), icon, 0, 0, 1, 2);
 
     GtkWidget *label = gtk_label_new(
-        "输入程序、文件夹、文档或互联网资源的名称，系统将为您打开它。");
+        "Windows 将根据你所输入的名称，为你打开相应的程序、文件夹、文档或 Internet 资源。");
     gtk_label_set_line_wrap(GTK_LABEL(label), TRUE);
     gtk_label_set_xalign(GTK_LABEL(label), 0);
     gtk_widget_set_size_request(label, 330, -1);
@@ -418,7 +419,8 @@ static void build_ui(void)
 
     gtk_box_pack_start(GTK_BOX(root_box), grid, FALSE, FALSE, 0);
 
-    /* 选项复选框 */
+    /* Restore the original two RunBox execution options directly below the
+       command field. Their existing do_run() wiring is intentionally kept. */
     GtkWidget *checks = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 18);
     gtk_widget_set_margin_start(checks, 68);
     gtk_widget_set_margin_top(checks, 6);
@@ -433,15 +435,15 @@ static void build_ui(void)
     gtk_widget_set_halign(btnbox, GTK_ALIGN_END);
     gtk_widget_set_margin_start(btnbox, 20);
     gtk_widget_set_margin_end(btnbox, 20);
-    gtk_widget_set_margin_top(btnbox, 12);
-    gtk_widget_set_margin_bottom(btnbox, 18);
+    gtk_widget_set_margin_top(btnbox, 18);
+    gtk_widget_set_margin_bottom(btnbox, 16);
 
     GtkWidget *b_ok = gtk_button_new_with_label("确定");
     GtkWidget *b_cancel = gtk_button_new_with_label("取消");
     GtkWidget *b_browse = gtk_button_new_with_mnemonic("浏览(_B)");
-    gtk_widget_set_size_request(b_ok, 92, -1);
-    gtk_widget_set_size_request(b_cancel, 92, -1);
-    gtk_widget_set_size_request(b_browse, 92, -1);
+    gtk_widget_set_size_request(b_ok, 110, 32);
+    gtk_widget_set_size_request(b_cancel, 110, 32);
+    gtk_widget_set_size_request(b_browse, 110, 32);
     gtk_widget_set_can_default(b_ok, TRUE);
     gtk_style_context_add_class(gtk_widget_get_style_context(b_ok), "runbox-ok");
     gtk_window_set_default(GTK_WINDOW(g_window), b_ok);

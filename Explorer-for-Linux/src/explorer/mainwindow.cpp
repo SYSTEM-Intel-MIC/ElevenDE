@@ -1,9 +1,11 @@
 #include "mainwindow.h"
 
+#include <QApplication>
 #include <QCloseEvent>
 #include <QDir>
 #include <QEvent>
 #include <QEventLoop>
+#include <QFile>
 #include <QFileIconProvider>
 #include <QHBoxLayout>
 #include <QIcon>
@@ -25,6 +27,32 @@
 #include "thispc.h"
 
 static const QString kPcPath = QStringLiteral("__thispc__");
+
+static QIcon win11Icon(const QString &name, const QString &category,
+                       QStyle::StandardPixmap fallback, QObject *owner = nullptr)
+{
+    Q_UNUSED(owner);
+    const QString base = QStringLiteral("/usr/local/share/elevende-shell/icons/");
+    const QStringList candidates = {
+        base + QStringLiteral("64x64/") + category + QLatin1Char('/') + name + QStringLiteral(".png"),
+        base + QStringLiteral("48x48/") + category + QLatin1Char('/') + name + QStringLiteral(".png"),
+        base + QStringLiteral("scalable/") + category + QLatin1Char('/') + name + QStringLiteral(".svg")
+    };
+    for (const QString &path : candidates)
+        if (QFile::exists(path))
+            return QIcon(path);
+    return QApplication::style()->standardIcon(fallback);
+}
+
+static QIcon win11AppIcon(const QString &name, QStyle::StandardPixmap fallback)
+{
+    return win11Icon(name, QStringLiteral("apps"), fallback);
+}
+
+static QIcon win11PlaceIcon(const QString &name, QStyle::StandardPixmap fallback)
+{
+    return win11Icon(name, QStringLiteral("places"), fallback);
+}
 
 static bool crashAnticsEnabled()
 {
@@ -50,11 +78,12 @@ MainWindow::MainWindow()
     , m_navigationCount(0)
 {
     setWindowTitle(QStringLiteral("此电脑"));
-    setWindowIcon(QIcon(QStringLiteral("/usr/local/share/elevende-shell/icons/scalable/apps/system-file-manager.svg")));
+    setWindowIcon(win11AppIcon(QStringLiteral("system-file-manager"), QStyle::SP_FileDialogContentsView));
     resize(1280, 800);
     setMinimumSize(720, 480);
 
     auto *central = new QWidget(this);
+    central->setObjectName(QStringLiteral("ExplorerSurface"));
     auto *root = new QVBoxLayout(central);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
@@ -70,7 +99,9 @@ MainWindow::MainWindow()
 
     m_stack = new QStackedWidget(middle);
     m_thisPc = new ThisPcView(m_stack);
+    m_thisPc->setObjectName(QStringLiteral("ExplorerSurface"));
     m_files = new FileList(m_stack);
+    m_files->setObjectName(QStringLiteral("ExplorerSurface"));
     m_stack->addWidget(m_thisPc);
     m_stack->addWidget(m_files);
     middleLayout->addWidget(m_stack, 1);
@@ -135,7 +166,7 @@ QWidget *MainWindow::buildTitleBar()
     layout->setSpacing(8);
 
     auto *icon = new QLabel(bar);
-    icon->setPixmap(style()->standardIcon(QStyle::SP_ComputerIcon).pixmap(16, 16));
+    icon->setPixmap(win11PlaceIcon(QStringLiteral("desktop-this-pc"), QStyle::SP_ComputerIcon).pixmap(18, 18));
     layout->addWidget(icon);
 
     m_titleLabel = new QLabel(bar);
@@ -186,11 +217,13 @@ QWidget *MainWindow::buildCommandBar()
     auto *commands = new QHBoxLayout;
     commands->setContentsMargins(0, 0, 0, 0);
     commands->setSpacing(2);
-    auto command = [&](const QString &text, QStyle::StandardPixmap icon, const QString &tip) {
+    auto command = [&](const QString &text, const QString &iconName,
+                        QStyle::StandardPixmap fallback, const QString &tip) {
         auto *b = new QToolButton(bar);
         b->setObjectName(QStringLiteral("CommandButton"));
         b->setText(text);
-        b->setIcon(style()->standardIcon(icon));
+        b->setIcon(win11AppIcon(iconName, fallback));
+        b->setIconSize(QSize(22, 22));
         b->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
         b->setToolTip(tip);
         b->setCursor(Qt::PointingHandCursor);
@@ -198,7 +231,7 @@ QWidget *MainWindow::buildCommandBar()
         return b;
     };
 
-    QToolButton *newBtn = command(tr("新建"), QStyle::SP_FileDialogNewFolder, tr("新建文件夹或文本文档"));
+    QToolButton *newBtn = command(tr("新建"), QStringLiteral("folder"), QStyle::SP_FileDialogNewFolder, tr("新建文件夹或文本文档"));
     QMenu *newMenu = new QMenu(newBtn);
     QAction *newFolder = newMenu->addAction(style()->standardIcon(QStyle::SP_FileDialogNewFolder), tr("文件夹"));
     QAction *newText = newMenu->addAction(style()->standardIcon(QStyle::SP_FileIcon), tr("文本文档"));
@@ -207,18 +240,30 @@ QWidget *MainWindow::buildCommandBar()
     newBtn->setPopupMode(QToolButton::InstantPopup);
     commands->addWidget(newBtn);
 
-    QToolButton *cutBtn = command(tr("剪切"), QStyle::SP_ArrowLeft, tr("剪切所选项目 (Ctrl+X)"));
-    QToolButton *copyBtn = command(tr("复制"), QStyle::SP_FileDialogContentsView, tr("复制所选项目 (Ctrl+C)"));
-    QToolButton *pasteBtn = command(tr("粘贴"), QStyle::SP_DialogApplyButton, tr("粘贴到当前文件夹 (Ctrl+V)"));
-    QToolButton *renameBtn = command(tr("重命名"), QStyle::SP_FileDialogDetailedView, tr("重命名所选项目 (F2)"));
-    QToolButton *deleteBtn = command(tr("删除"), QStyle::SP_TrashIcon, tr("移入回收站 (Delete)"));
-    commands->addWidget(cutBtn);
-    commands->addWidget(copyBtn);
-    commands->addWidget(pasteBtn);
-    commands->addWidget(renameBtn);
-    commands->addWidget(deleteBtn);
+    auto separator = [&]() {
+        auto *line = new QFrame(bar);
+        line->setFrameShape(QFrame::VLine);
+        line->setObjectName(QStringLiteral("CommandSeparator"));
+        line->setFixedHeight(26);
+        return line;
+    };
+    commands->addWidget(separator());
+    QToolButton *cutBtn = command(QString(), QStringLiteral("edit-cut"), QStyle::SP_ArrowLeft, tr("剪切所选项目 (Ctrl+X)"));
+    QToolButton *copyBtn = command(QString(), QStringLiteral("edit-copy"), QStyle::SP_FileDialogContentsView, tr("复制所选项目 (Ctrl+C)"));
+    QToolButton *pasteBtn = command(QString(), QStringLiteral("edit-paste"), QStyle::SP_DialogApplyButton, tr("粘贴到当前文件夹 (Ctrl+V)"));
+    QToolButton *renameBtn = command(QString(), QStringLiteral("edit-rename"), QStyle::SP_FileDialogDetailedView, tr("重命名所选项目 (F2)"));
+    QToolButton *shareBtn = command(QString(), QStringLiteral("explorer-share"), QStyle::SP_DialogOpenButton, tr("共享"));
+    QToolButton *deleteBtn = command(QString(), QStringLiteral("user-trash"), QStyle::SP_TrashIcon, tr("移入回收站 (Delete)"));
+    const QList<QToolButton *> compactCommands = { cutBtn, copyBtn, pasteBtn, renameBtn, shareBtn, deleteBtn };
+    for (QToolButton *button : compactCommands) {
+        button->setToolButtonStyle(Qt::ToolButtonIconOnly);
+        button->setIconSize(QSize(22, 22));
+        button->setFixedSize(38, 32);
+        commands->addWidget(button);
+    }
+    commands->addWidget(separator());
 
-    QToolButton *viewBtn = command(tr("查看"), QStyle::SP_FileDialogListView, tr("切换文件视图"));
+    QToolButton *viewBtn = command(tr("查看"), QStringLiteral("view-grid"), QStyle::SP_FileDialogListView, tr("切换文件视图"));
     QMenu *viewMenu = new QMenu(viewBtn);
     QAction *viewIcon = viewMenu->addAction(tr("大图标"));
     QAction *viewList = viewMenu->addAction(tr("列表"));
@@ -230,7 +275,7 @@ QWidget *MainWindow::buildCommandBar()
     viewBtn->setPopupMode(QToolButton::InstantPopup);
     commands->addWidget(viewBtn);
 
-    QToolButton *sortBtn = command(tr("排序"), QStyle::SP_ArrowUp, tr("按名称、大小、类型或时间排序"));
+    QToolButton *sortBtn = command(tr("排序"), QStringLiteral("view-sort-ascending"), QStyle::SP_ArrowUp, tr("按名称、大小、类型或时间排序"));
     QMenu *sortMenu = new QMenu(sortBtn);
     QAction *sortName = sortMenu->addAction(tr("按名称"));
     QAction *sortSize = sortMenu->addAction(tr("按大小"));
@@ -240,32 +285,52 @@ QWidget *MainWindow::buildCommandBar()
     sortBtn->setPopupMode(QToolButton::InstantPopup);
     commands->addWidget(sortBtn);
 
-    QToolButton *refreshBtn = command(tr("刷新"), QStyle::SP_BrowserReload, tr("刷新当前文件夹 (F5)"));
-    QToolButton *pathBtn = command(tr("复制路径"), QStyle::SP_DialogSaveButton, tr("复制当前文件夹路径"));
-    QToolButton *propsBtn = command(tr("属性"), QStyle::SP_MessageBoxInformation, tr("查看选中项目属性"));
-    commands->addWidget(refreshBtn);
-    commands->addWidget(pathBtn);
-    commands->addWidget(propsBtn);
+    QToolButton *moreBtn = new QToolButton(bar);
+    moreBtn->setObjectName(QStringLiteral("CommandButton"));
+    moreBtn->setIcon(win11AppIcon(QStringLiteral("more-horizontal"), QStyle::SP_TitleBarUnshadeButton));
+    moreBtn->setIconSize(QSize(20, 20));
+    moreBtn->setToolTip(tr("更多"));
+    moreBtn->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    moreBtn->setFixedSize(42, 32);
+    QMenu *moreMenu = new QMenu(moreBtn);
+    QAction *refreshAction = moreMenu->addAction(tr("刷新"));
+    QAction *pathAction = moreMenu->addAction(tr("复制路径"));
+    QAction *propsAction = moreMenu->addAction(tr("属性"));
+    moreBtn->setMenu(moreMenu);
+    moreBtn->setPopupMode(QToolButton::InstantPopup);
+    commands->addWidget(moreBtn);
     commands->addStretch(1);
-    root->addLayout(commands);
 
     auto *navigation = new QHBoxLayout;
     navigation->setContentsMargins(0, 0, 0, 0);
     navigation->setSpacing(4);
-    auto navBtn = [&](const QString &glyph, const char *name, const QString &tip) {
-        auto *b = new QPushButton(glyph, bar);
+    auto navBtn = [&](const QString &iconName, const char *name, const QString &tip) {
+        auto *b = new QPushButton(bar);
         b->setObjectName(QString::fromLatin1(name));
-        b->setFixedSize(30, 28);
+        b->setIcon(win11AppIcon(iconName, QStyle::SP_ArrowLeft));
+        b->setIconSize(QSize(20, 20));
+        b->setFixedSize(32, 30);
         b->setToolTip(tip);
         b->setCursor(Qt::PointingHandCursor);
         return b;
     };
-    m_backBtn = navBtn(QStringLiteral("\u25C0"), "NavBack", tr("后退 (Alt+左)"));
-    m_forwardBtn = navBtn(QStringLiteral("\u25B6"), "NavForward", tr("前进 (Alt+右)"));
-    m_upBtn = navBtn(QStringLiteral("\u25B2"), "NavUp", tr("向上"));
+    m_backBtn = navBtn(QStringLiteral("nav-back"), "NavBack", tr("后退 (Alt+左)"));
+    m_forwardBtn = navBtn(QStringLiteral("nav-forward"), "NavForward", tr("前进 (Alt+右)"));
+    m_upBtn = navBtn(QStringLiteral("nav-up"), "NavUp", tr("向上"));
+    auto *refreshBtn = navBtn(QStringLiteral("nav-refresh"), "NavRefresh", tr("刷新"));
+    auto *computerBtn = navBtn(QStringLiteral("nav-computer"), "NavComputer", tr("此电脑"));
     navigation->addWidget(m_backBtn);
     navigation->addWidget(m_forwardBtn);
     navigation->addWidget(m_upBtn);
+    navigation->addWidget(refreshBtn);
+    navigation->addWidget(computerBtn);
+    connect(refreshBtn, &QPushButton::clicked, this, [this]() {
+        if (m_files && m_stack->currentWidget() == m_files)
+            m_files->refresh();
+        else
+            navigateTo(kPcPath);
+    });
+    connect(computerBtn, &QPushButton::clicked, this, [this]() { navigateTo(kPcPath); });
 
     m_navStack = new QStackedWidget(bar);
     m_navStack->setFixedHeight(28);
@@ -287,10 +352,14 @@ QWidget *MainWindow::buildCommandBar()
 
     m_search = new QLineEdit(bar);
     m_search->setObjectName(QStringLiteral("Search"));
-    m_search->setPlaceholderText(QStringLiteral("搜索当前文件夹"));
-    m_search->setFixedSize(210, 28);
-    navigation->addWidget(m_search);
+    m_search->setPlaceholderText(QStringLiteral("在此电脑中搜索"));
+    m_search->setFixedHeight(30);
+    m_search->addAction(win11AppIcon(QStringLiteral("nav-search"), QStyle::SP_FileDialogContentsView),
+                        QLineEdit::TrailingPosition);
+    navigation->addWidget(m_search, 0);
+    /* Windows 11 places the path/navigation row above the command row. */
     root->addLayout(navigation);
+    root->addLayout(commands);
 
     connect(m_backBtn, &QPushButton::clicked, this, &MainWindow::goBack);
     connect(m_forwardBtn, &QPushButton::clicked, this, &MainWindow::goForward);
@@ -312,9 +381,10 @@ QWidget *MainWindow::buildCommandBar()
     connect(sortSize, &QAction::triggered, this, [this] { if (m_files) m_files->sortBySize(); });
     connect(sortType, &QAction::triggered, this, [this] { if (m_files) m_files->sortByType(); });
     connect(sortDate, &QAction::triggered, this, [this] { if (m_files) m_files->sortByDate(); });
-    connect(refreshBtn, &QToolButton::clicked, this, [this] { if (m_files) m_files->refresh(); });
-    connect(pathBtn, &QToolButton::clicked, this, [this] { if (m_files) m_files->copyCurrentPath(); });
-    connect(propsBtn, &QToolButton::clicked, this, [this] { if (m_files) m_files->showSelectedProperties(); });
+    connect(shareBtn, &QToolButton::clicked, this, [this] { if (m_files) m_files->copyCurrentPath(); });
+    connect(refreshAction, &QAction::triggered, this, [this] { if (m_files) m_files->refresh(); });
+    connect(pathAction, &QAction::triggered, this, [this] { if (m_files) m_files->copyCurrentPath(); });
+    connect(propsAction, &QAction::triggered, this, [this] { if (m_files) m_files->showSelectedProperties(); });
 
     return bar;
 }
@@ -323,10 +393,10 @@ QWidget *MainWindow::buildSidebar()
 {
     auto *panel = new QWidget(this);
     panel->setObjectName(QStringLiteral("Sidebar"));
-    panel->setFixedWidth(170);
+    panel->setFixedWidth(220);
 
     auto *layout = new QVBoxLayout(panel);
-    layout->setContentsMargins(6, 6, 6, 6);
+    layout->setContentsMargins(10, 10, 10, 10);
     layout->setSpacing(0);
 
     auto sectionTitle = [&](const QString &text) {
@@ -338,31 +408,39 @@ QWidget *MainWindow::buildSidebar()
     auto makeList = [&](QWidget *parent) {
         auto *list = new QListWidget(parent);
         list->setObjectName(QStringLiteral("SidebarList"));
+        list->setIconSize(QSize(20, 20));
+        list->setSpacing(1);
         list->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
         list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         list->setContextMenuPolicy(Qt::NoContextMenu);  /* no English default menu */
         return list;
     };
-    auto addItem = [&](QListWidget *list, const QString &text, const QString &path, QStyle::StandardPixmap pix) {
+    auto addItem = [&](QListWidget *list, const QString &text, const QString &path,
+                       const QString &iconName, QStyle::StandardPixmap fallback) {
         auto *item = new QListWidgetItem(list);
-        item->setIcon(style()->standardIcon(pix));
+        /* Navigation locations are physical places, not applications. Use the
+           curated colour WindowsIcons place namespace here; the old apps
+           namespace caused Home/Desktop/Pictures/Trash to resolve to black
+           Fluent glyphs while Documents happened to have a valid alias. */
+        item->setIcon(win11PlaceIcon(iconName, fallback));
         item->setText(text);
         item->setData(Qt::UserRole, path);
     };
 
-    layout->addWidget(sectionTitle(tr("文件夹")));
+    layout->addWidget(sectionTitle(tr("快速访问")));
     m_sidebar = makeList(panel);
-    addItem(m_sidebar, tr("主页"), QDir::homePath(), QStyle::SP_DirHomeIcon);
-    addItem(m_sidebar, tr("下载"), QDir::homePath() + QStringLiteral("/Downloads"), QStyle::SP_DirIcon);
-    addItem(m_sidebar, tr("文档"), QDir::homePath() + QStringLiteral("/Documents"), QStyle::SP_DirIcon);
-    addItem(m_sidebar, tr("图片"), QDir::homePath() + QStringLiteral("/Pictures"), QStyle::SP_DirIcon);
+    addItem(m_sidebar, tr("主页"), QDir::homePath(), QStringLiteral("user-home"), QStyle::SP_DirHomeIcon);
+    addItem(m_sidebar, tr("桌面"), QDir::homePath() + QStringLiteral("/Desktop"), QStringLiteral("desktop"), QStyle::SP_DirIcon);
+    addItem(m_sidebar, tr("下载"), QDir::homePath() + QStringLiteral("/Downloads"), QStringLiteral("downloads"), QStyle::SP_DirIcon);
+    addItem(m_sidebar, tr("文档"), QDir::homePath() + QStringLiteral("/Documents"), QStringLiteral("documents"), QStyle::SP_DirIcon);
+    addItem(m_sidebar, tr("图片"), QDir::homePath() + QStringLiteral("/Pictures"), QStringLiteral("pictures"), QStyle::SP_DirIcon);
     layout->addWidget(m_sidebar, 1);
 
     layout->addSpacing(2);
-    layout->addWidget(sectionTitle(tr("位置")));
+    layout->addWidget(sectionTitle(tr("此电脑与设备")));
     m_sidebarExtra = makeList(panel);
-    addItem(m_sidebarExtra, tr("此电脑"), kPcPath, QStyle::SP_ComputerIcon);
-    addItem(m_sidebarExtra, tr("回收站"), QStringLiteral("__trash__"), QStyle::SP_TrashIcon);
+    addItem(m_sidebarExtra, tr("此电脑"), kPcPath, QStringLiteral("desktop-this-pc"), QStyle::SP_ComputerIcon);
+    addItem(m_sidebarExtra, tr("回收站"), QStringLiteral("__trash__"), QStringLiteral("user-trash"), QStyle::SP_TrashIcon);
     layout->addWidget(m_sidebarExtra);
 
     return panel;
@@ -471,8 +549,11 @@ void MainWindow::updateBreadcrumb(const QString &path)
         m_breadcrumbLayout->addWidget(b);
     };
     auto addSep = [&]() {
-        auto *sep = new QLabel(QStringLiteral("\u203A"), m_breadcrumbHost);
+        auto *sep = new QLabel(m_breadcrumbHost);
         sep->setObjectName(QStringLiteral("CrumbSep"));
+        sep->setPixmap(win11AppIcon(QStringLiteral("nav-chevron-right"), QStyle::SP_ArrowRight).pixmap(14, 14));
+        sep->setFixedSize(16, 20);
+        sep->setAlignment(Qt::AlignCenter);
         m_breadcrumbLayout->addWidget(sep);
     };
 

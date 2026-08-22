@@ -199,12 +199,9 @@ ICONS['utilities-terminal-symbolic'] = svg(
     '<text x="62" y="134" font-family="Cascadia Mono,Consolas,monospace" font-size="60" font-weight="700" fill="#76e4d1">&gt;_</text>'
     '<rect x="61" y="160" width="90" height="9" rx="4.5" fill="#b5c8dc" opacity=".8"/>'
 )
-ICONS['system-run'] = svg(
-    f'<defs>{grad("run","#62d2ff","#1d67c8")}</defs>'
-    '<rect x="28" y="28" width="200" height="200" rx="38" fill="url(#run)"/>'
-    '<circle cx="128" cy="128" r="62" fill="#ffffff" opacity=".96"/>'
-    '<path d="M108 92 l55 36 -55 36 Z" fill="#1769c2"/>'
-)
+# system-run is intentionally not generated here. The official WindowsIcons
+# `applications/run.ico` is imported by import_windowsicons.py and must remain
+# authoritative; the old generated play-button glyph looked like a media player.
 ICONS['system-file-manager'] = ICONS['folder']
 ICONS['accessories-text-editor'] = ICONS['text-x-generic']
 

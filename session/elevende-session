@@ -1,5 +1,5 @@
 #!/bin/sh
-# ElevenDE 3.0 X11 session. Launch:  startx /usr/local/bin/elevende-session
+# ElevenDE 3.5.1 X11 session. Launch: startx /usr/local/bin/elevende-session
 #
 # Paint a base background, run the native C/Xlib shell in the background,
 # then run Openbox in the foreground. The session lasts exactly as long as
@@ -7,10 +7,22 @@
 
 export XDG_CURRENT_DESKTOP=ElevenDE
 export XDG_SESSION_TYPE=x11
+# Global window-chrome policy: Openbox/ElevenDE owns the titlebar for every
+# ordinary X11 client, including third-party GTK/Qt applications. GTK_CSD=0
+# avoids a second in-client headerbar where GTK3 supports server decoration;
+# Firefox gets the corresponding Mozilla hint. Apps remain unaware of ElevenDE.
+export GDK_BACKEND=x11
+export GTK_CSD=0
+export MOZ_GTK_TITLEBAR_DECORATION=system
+export QT_QPA_PLATFORM=xcb
 export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
 
 SHARE_DIR=/usr/local/share/elevende-shell
+# Openbox may omit /usr/local/share from its theme search path on minimal
+# Debian installs. Put the packaged ElevenDE theme before system themes so
+# every X11 client receives the same Windows 11 chrome.
+export XDG_DATA_DIRS="/usr/local/share:/usr/share${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
 USER_CFG_DIR="$HOME/.config/elevende"
 
 if [ -f /etc/X11/Xresources.d/elevende ]; then
@@ -40,9 +52,15 @@ fi
 
 echo "elevende-session: starting compositor (picom)"
 if command -v picom >/dev/null 2>&1; then
-    if [ -f "$SHARE_DIR/picom.conf" ]; then
-        picom --config "$SHARE_DIR/picom.conf" \
-        >/tmp/elevende-picom.log 2>&1 &
+    # XRender is the stable default across Debian hardware and virtual GPUs.
+    # GLX Mica is opt-in only: it may require DRI3/EGL and otherwise surfaces
+    # a Picom warning dialog before the desktop is usable.
+    COMPOSITOR_CFG="$SHARE_DIR/picom.conf"
+    if [ "${ELEVENDE_ENABLE_GLX_MICA:-0}" = "1" ] && [ -f "$SHARE_DIR/picom-mica.conf" ]; then
+        COMPOSITOR_CFG="$SHARE_DIR/picom-mica.conf"
+    fi
+    if [ -f "$COMPOSITOR_CFG" ]; then
+        picom --config "$COMPOSITOR_CFG" >/tmp/elevende-picom.log 2>&1 &
     else
         picom >/tmp/elevende-picom.log 2>&1 &
     fi

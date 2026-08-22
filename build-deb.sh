@@ -206,8 +206,13 @@ install -Dm644 wm/shortcuts.json  "$PKG_ROOT$SHARE/shortcuts.json"
 install -Dm644 wm/sas-config.json "$PKG_ROOT$SHARE/sas-config.json"
 install -Dm644 wm/menu.xml        "$PKG_ROOT$SHARE/menu.xml"
 install -Dm644 wm/picom.conf      "$PKG_ROOT$SHARE/picom.conf"
-mkdir -p "$PKG_ROOT$PREFIX/share/themes/ElevenDE/openbox-3"
-install -m644 wm/ElevenDE/openbox-3/* "$PKG_ROOT$PREFIX/share/themes/ElevenDE/openbox-3/"
+install -Dm644 wm/picom-mica.conf "$PKG_ROOT$SHARE/picom-mica.conf"
+install -Dm644 assets/material/mica-noise.png "$PKG_ROOT$SHARE/material/mica-noise.png"
+# Openbox searches the system theme directory on Debian; installing under
+# /usr/local/share/themes is not reliable and silently falls back to a blue
+# default theme.
+mkdir -p "$PKG_ROOT/usr/share/themes/ElevenDE/openbox-3"
+install -m644 wm/ElevenDE/openbox-3/* "$PKG_ROOT/usr/share/themes/ElevenDE/openbox-3/"
 
 # session + X resources + xsessions entry
 install -Dm755 session/elevende-session "$PKG_ROOT$BIN/elevende-session"
@@ -227,10 +232,30 @@ done
 if command -v rsvg-convert >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
     (
         cd assets
+        # Refresh curated WindowsIcons PNGs first so drive-windows and the
+        # shared This PC aliases cannot remain stale between local builds.
+        if [ -f import_windowsicons.py ] && [ -d "${WINDOWSICONS_SOURCE:-/tmp/windowsicons-current/Icons}" ]; then
+            WINDOWSICONS_SOURCE="${WINDOWSICONS_SOURCE:-/tmp/windowsicons-current/Icons}" python3 import_windowsicons.py
+        fi
+        # Stage official Microsoft Fluent System Icons when the local checkout
+        # is available; these aliases replace ordinary ICOs for tray state and
+        # Explorer command-bar controls.
+        if [ -f import_fluent_icons.py ] && [ -d "${FLUENT_SOURCE:-/tmp/fluent-system-icons/assets}" ]; then
+            FLUENT_SOURCE="${FLUENT_SOURCE:-/tmp/fluent-system-icons/assets}" python3 import_fluent_icons.py
+        fi
         python3 gen_icons.py
-        rm -rf icons
+        # Keep curated WindowsIcons PNGs already staged in assets/icons;
+        # regenerate only the SVG-derived aliases; core names are excluded below.
+        mkdir -p icons
         for f in icons-svg/*.svg; do
             n="$(basename "$f" .svg)"
+            # These six first-party apps are curated from HaydenReeve's
+            # WindowsIcons set. Never replace their PNGs with generic SVG
+            # aliases during packaging; all UI surfaces must share one asset.
+            case "$n" in
+                utilities-terminal|accessories-calculator|preferences-system|utilities-system-monitor|accessories-text-editor|system-file-manager|system-run)
+                    continue ;;
+            esac
             for s in 32 48 64 96 128; do
                 mkdir -p "icons/${s}x${s}/apps"
                 rsvg-convert -w "$s" -h "$s" "$f" -o "icons/${s}x${s}/apps/${n}.png"
@@ -238,15 +263,28 @@ if command -v rsvg-convert >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1
             mkdir -p "icons/scalable/apps"
             cp "$f" "icons/scalable/apps/${n}.svg"
         done
+        # Use packaged WindowsIcons assets, converted to monochrome black for
+        # the compact system tray; never fall back to Shell-drawn glyphs.
+        python3 make_tray_black.py
     )
 fi
 if [ -d assets/icons ]; then
     mkdir -p "$PKG_ROOT$SHARE/icons"
     cp -r assets/icons/. "$PKG_ROOT$SHARE/icons/"
+    # The lock/login screen is setuid-root and must not depend on icon-theme
+    # lookup. Install its official Fluent default avatar at a fixed path too.
+    if [ -f assets/icons/96x96/apps/login-user-avatar.png ]; then
+        install -m644 assets/icons/96x96/apps/login-user-avatar.png \
+            "$PKG_ROOT$SHARE/login-user-avatar.png"
+    fi
 fi
 mkdir -p "$PKG_ROOT$SHARE/wallpapers"
 if ls assets/wallpapers/*.png >/dev/null 2>&1; then
     install -m644 assets/wallpapers/*.png "$PKG_ROOT$SHARE/wallpapers/"
+    # The third supplied wallpaper is the Lindows light default.
+    if [ -f assets/wallpapers/wallpaper-lindows-light.png ]; then
+        install -m644 assets/wallpapers/wallpaper-lindows-light.png "$PKG_ROOT$SHARE/wallpaper.png"
+    fi
 fi
 
 # autologin helper (opt-in; see postinst message)
@@ -259,8 +297,15 @@ install -Dm755 build-deb.sh "$PKG_ROOT$DOC_DIR/build-deb.sh"
 install -Dm755 install.sh "$PKG_ROOT$DOC_DIR/install.sh"
 install -Dm644 README.md "$PKG_ROOT$DOC_DIR/README.md"
 [ -f TESTING.md ] && install -Dm644 TESTING.md "$PKG_ROOT$DOC_DIR/TESTING.md"
-[ -f assets/icons-svg/THIRD_PARTY_NOTICES.md ] && install -Dm644 assets/icons-svg/THIRD_PARTY_NOTICES.md "$PKG_ROOT$DOC_DIR/THIRD_PARTY_NOTICES.md"
 install -Dm644 LICENSE "$PKG_ROOT$DOC_DIR/LICENSE"
+[ -f NOTICE ] && install -Dm644 NOTICE "$PKG_ROOT$DOC_DIR/NOTICE"
+[ -f THIRD-PARTY-NOTICES.md ] && install -Dm644 THIRD-PARTY-NOTICES.md "$PKG_ROOT$DOC_DIR/THIRD-PARTY-NOTICES.md"
+[ -f assets/WINDOWSICONS-NOTICE.md ] && install -Dm644 assets/WINDOWSICONS-NOTICE.md "$PKG_ROOT$DOC_DIR/WINDOWSICONS-NOTICE.md"
+[ -f assets/import_windowsicons.py ] && install -Dm755 assets/import_windowsicons.py "$PKG_ROOT$DOC_DIR/import_windowsicons.py"
+if [ -d LICENSES ]; then
+    mkdir -p "$PKG_ROOT$DOC_DIR/LICENSES"
+    install -m644 LICENSES/* "$PKG_ROOT$DOC_DIR/LICENSES/"
+fi
 
 # ---- 4. DEBIAN metadata -----------------------------------------------------
 log "writing DEBIAN metadata"

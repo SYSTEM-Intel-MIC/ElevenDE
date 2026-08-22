@@ -322,8 +322,12 @@ install -Dm644 "$SRC_DIR/wm/shortcuts.json"  "$SHARE/shortcuts.json"
 install -Dm644 "$SRC_DIR/wm/sas-config.json" "$SHARE/sas-config.json"
 install -Dm644 "$SRC_DIR/wm/menu.xml"        "$SHARE/menu.xml"
 install -Dm644 "$SRC_DIR/wm/picom.conf"      "$SHARE/picom.conf"
-mkdir -p "$PREFIX/share/themes/ElevenDE/openbox-3"
-install -m644 "$SRC_DIR"/wm/ElevenDE/openbox-3/* "$PREFIX/share/themes/ElevenDE/openbox-3/"
+install -Dm644 "$SRC_DIR/wm/picom-mica.conf" "$SHARE/picom-mica.conf"
+install -Dm644 "$SRC_DIR/assets/material/mica-noise.png" "$SHARE/material/mica-noise.png"
+# Debian Openbox searches /usr/share/themes; using only /usr/local/share
+# causes a silent fallback to the stock blue decoration.
+mkdir -p "/usr/share/themes/ElevenDE/openbox-3"
+install -m644 "$SRC_DIR"/wm/ElevenDE/openbox-3/* "/usr/share/themes/ElevenDE/openbox-3/"
 
 # session entry
 install -Dm755 "$SRC_DIR/session/elevende-session" "$BIN/elevende-session"
@@ -397,7 +401,7 @@ rm -f /usr/share/wayland-sessions/elevende.desktop 2>/dev/null || true
 
 log "done."
 echo
-echo "ElevenDE 3.3 installed. Reboot: it boots to a console, auto-logs-in"
+echo "ElevenDE 3.5.1 installed. Reboot: it boots to a console, auto-logs-in"
 echo "as '$LOGIN_USER' and starts the desktop via startx."
 echo
 echo "  Windows shortcuts (manage them in Settings -> 快捷键, Win+I):"

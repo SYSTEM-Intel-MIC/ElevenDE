@@ -83,7 +83,11 @@ int main(int argc, char **argv)
     const QString theme = pickIconTheme();
     if (!theme.isEmpty())
         QIcon::setThemeName(theme);
-    app.setWindowIcon(QIcon(QStringLiteral("/usr/local/share/elevende-shell/icons/scalable/apps/system-file-manager.svg")));
+    const QString win11ExplorerPng = QStringLiteral("/usr/local/share/elevende-shell/icons/64x64/apps/system-file-manager.png");
+    const QString win11ExplorerSvg = QStringLiteral("/usr/local/share/elevende-shell/icons/scalable/apps/system-file-manager.svg");
+    app.setWindowIcon(QFileInfo::exists(win11ExplorerPng)
+                      ? QIcon(win11ExplorerPng)
+                      : QIcon(win11ExplorerSvg));
 
     ColorScheme scheme = detectColorScheme(&app);
     app.setStyleSheet(win11StyleSheet(scheme == ColorScheme::Dark));

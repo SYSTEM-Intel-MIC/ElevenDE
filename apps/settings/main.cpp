@@ -20,6 +20,8 @@
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QEvent>
+#include <QMouseEvent>
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
@@ -44,8 +46,9 @@
 #include <QRadioButton>
 #include <QRegularExpression>
 #include <QScrollArea>
-#include <QSettings>
-#include <QSlider>
+#include <QTextEdit>
+#include <QToolButton>
+#include <QTimer>
 #include <QStackedWidget>
 #include <QStandardPaths>
 #include <QTableWidget>
@@ -186,14 +189,26 @@ void notifyShellWallpaperChanged()
     if (!d)
         return;
     const Atom type = XInternAtom(d, "_ELEVENDE_RELOAD_WALLPAPER", False);
+    const Atom serialAtom = XInternAtom(d, "_ELEVENDE_WALLPAPER_SERIAL", False);
+    static unsigned long serial = 0;
+    ++serial;
     XEvent ev;
     memset(&ev, 0, sizeof ev);
     ev.xclient.type = ClientMessage;
     ev.xclient.window = DefaultRootWindow(d);
     ev.xclient.message_type = type;
     ev.xclient.format = 32;
-    XSendEvent(d, DefaultRootWindow(d), False, SubstructureRedirectMask | SubstructureNotifyMask, &ev);
-    XFlush(d);
+    /* Send directly to the root window with mask 0. The shell owns the root
+       event selection and must receive this client message even when another
+       WM does not select SubstructureRedirectMask. */
+    XSendEvent(d, DefaultRootWindow(d), False, 0, &ev);
+    /* A root property change is selected by the shell and survives event-mask
+       differences between X servers/WM setups.  It is a second, ordered
+       notification after the atomic file rename, not a replacement for the
+       legacy ClientMessage. */
+    XChangeProperty(d, DefaultRootWindow(d), serialAtom, XA_CARDINAL, 32,
+                    PropModeReplace, reinterpret_cast<unsigned char *>(&serial), 1);
+    XSync(d, False);
     XCloseDisplay(d);
 #endif
 }
@@ -244,6 +259,101 @@ QWidget *scrollOf(QWidget *inner)
     return sa;
 }
 
+/* ---------- 设置主页（Windows 11 卡片框架） ---------- */
+
+QWidget *homeActionRow(const QString &iconName, const QString &title, const QString &detail, int pageIndex)
+{
+    auto *row = new QWidget();
+    row->setObjectName(QStringLiteral("settingsHomeRow"));
+    row->setProperty("settingsPageIndex", pageIndex);
+    row->setCursor(Qt::PointingHandCursor);
+    row->setMinimumHeight(58);
+    row->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    row->setProperty("homeRow", true);
+    auto *h = new QHBoxLayout(row);
+    h->setContentsMargins(18, 12, 16, 12);
+    h->setSpacing(14);
+    auto *ico = new QLabel(row);
+    ico->setAttribute(Qt::WA_TransparentForMouseEvents);
+    ico->setProperty("homeGlyph", true);
+    ico->setAlignment(Qt::AlignCenter);
+    ico->setFixedSize(28, 28);
+    ico->setPixmap(Win11Style::appIcon(iconName).pixmap(24, 24));
+    auto *copy = new QWidget(row);
+    copy->setAttribute(Qt::WA_TransparentForMouseEvents);
+    auto *v = new QVBoxLayout(copy);
+    v->setContentsMargins(0, 0, 0, 0);
+    v->setSpacing(1);
+    auto *t = new QLabel(title, copy);
+    t->setAttribute(Qt::WA_TransparentForMouseEvents);
+    QFont tf = t->font(); tf.setPointSizeF(10.5); t->setFont(tf);
+    t->setStyleSheet(QStringLiteral("color:#202020; background:transparent;"));
+    auto *s = new QLabel(detail, copy);
+    s->setAttribute(Qt::WA_TransparentForMouseEvents);
+    s->setProperty("subtle", true);
+    s->setStyleSheet(QStringLiteral("color:#6d6f78; background:transparent;"));
+    v->addWidget(t);
+    if (!detail.isEmpty()) v->addWidget(s);
+    h->addWidget(ico);
+    h->addWidget(copy, 1);
+    auto *arrow = new QLabel(QStringLiteral("›"), row);
+    arrow->setAttribute(Qt::WA_TransparentForMouseEvents);
+    QFont af = arrow->font(); af.setPointSizeF(18); arrow->setFont(af);
+    h->addWidget(arrow);
+    return row;
+}
+
+QWidget *buildHomePage()
+{
+    auto *page = new QWidget();
+    auto *outer = new QVBoxLayout(page);
+    outer->setContentsMargins(38, 26, 38, 32);
+    outer->setSpacing(16);
+    auto *heading = pageHeading(QStringLiteral("主页"));
+    QFont hf = heading->font(); hf.setPointSizeF(25); hf.setWeight(QFont::DemiBold); heading->setFont(hf);
+    outer->addWidget(heading);
+
+    auto *device = new QWidget();
+    auto *dh = new QHBoxLayout(device);
+    dh->setContentsMargins(0, 0, 0, 0); dh->setSpacing(16);
+    auto *preview = new QLabel(device);
+    preview->setAlignment(Qt::AlignCenter); preview->setFixedSize(128, 76);
+    preview->setPixmap(Win11Style::appIcon(QStringLiteral("desktop-this-pc")).pixmap(56, 56));
+    preview->setProperty("devicePreview", true);
+    auto *copy = new QWidget(device); auto *cv = new QVBoxLayout(copy);
+    cv->setContentsMargins(0, 3, 0, 3); cv->setSpacing(2);
+    auto *host = new QLabel(QHostInfo::localHostName().toUpper(), copy);
+    QFont hostf = host->font(); hostf.setPointSizeF(14); hostf.setBold(true); host->setFont(hostf);
+    auto *desc = new QLabel(QStringLiteral("Lindows · ElevenDE"), copy); desc->setProperty("subtle", true);
+    cv->addWidget(host); cv->addWidget(desc); cv->addStretch(1);
+    dh->addWidget(preview); dh->addWidget(copy, 1);
+    outer->addWidget(device);
+
+    auto *columns = new QHBoxLayout(); columns->setSpacing(14);
+    auto *left = new QVBoxLayout(); left->setSpacing(14);
+    auto *right = new QVBoxLayout(); right->setSpacing(14);
+    auto makeBody = [](const QList<QWidget *> &rows) {
+        auto *body = new QWidget(); auto *v = new QVBoxLayout(body);
+        v->setContentsMargins(0, 0, 0, 0); v->setSpacing(0);
+        for (QWidget *row : rows) v->addWidget(row);
+        return body;
+    };
+    left->addWidget(makeCard(QStringLiteral("系统"), makeBody({
+        homeActionRow(QStringLiteral("settings-nav-system"), QStringLiteral("系统信息"), QStringLiteral("设备名称、处理器、内存和磁盘"), 1),
+        homeActionRow(QStringLiteral("settings-nav-display"), QStringLiteral("显示"), QStringLiteral("分辨率和亮度"), 3),
+        homeActionRow(QStringLiteral("settings-nav-network"), QStringLiteral("网络和 Internet"), QStringLiteral("网络接口和连接状态"), 4)
+    }), QStringLiteral("ElevenDE 已提供的系统功能")));
+    right->addWidget(makeCard(QStringLiteral("个性化"), makeBody({
+        homeActionRow(QStringLiteral("settings-nav-personalization"), QStringLiteral("背景"), QStringLiteral("壁纸设置与即时预览"), 2),
+        homeActionRow(QStringLiteral("settings-nav-sound"), QStringLiteral("声音"), QStringLiteral("输出设备与音量"), 5),
+        homeActionRow(QStringLiteral("settings-nav-shortcuts"), QStringLiteral("快捷键"), QStringLiteral("Windows 风格快捷键"), 6)
+    }), QStringLiteral("只显示当前可配置功能")));
+    left->addStretch(1); right->addStretch(1);
+    columns->addLayout(left, 1); columns->addLayout(right, 1);
+    outer->addLayout(columns, 1);
+    return scrollOf(page);
+}
+
 /* ---------- 系统（关于） ---------- */
 
 QWidget *buildAboutPage()
@@ -279,7 +389,7 @@ QWidget *buildAboutPage()
                                QStringLiteral("内核"), QStringLiteral("桌面环境") };
     const QStringList vals = { cpuModel(), totalRam(), rootDiskSize(),
                                osReleaseValue(QStringLiteral("PRETTY_NAME")),
-                               kernelVersion(), QStringLiteral("ElevenDE 3.0 (X11)") };
+                               kernelVersion(), QStringLiteral("ElevenDE 3.5.1 (X11)") };
     for (int i = 0; i < keys.size(); ++i) {
         auto *k = new QLabel(keys.at(i) + QStringLiteral("："), spec);
         k->setProperty("subtle", true);
@@ -295,8 +405,8 @@ QWidget *buildAboutPage()
                           new QLabel(QStringLiteral(
                               "ElevenDE 是一个 Windows 11 风格的开源 Linux 桌面环境，\n"
                               "基于自研 C/Xlib Shell + Openbox 窗口管理器。\n"
-                              "MIT License.")),
-                          QStringLiteral("版本 3.0")));
+                              "GNU General Public License v3.0 or later.")),
+                          QStringLiteral("版本 3.5.1")));
     v->addStretch(1);
     return scrollOf(page);
 }
@@ -334,66 +444,14 @@ public:
         });
         v->addWidget(pickBtn, 0, Qt::AlignLeft);
 
-        /* --- colors --- */
-        auto *colorBody = new QWidget();
-        auto *cv = new QVBoxLayout(colorBody);
-        cv->setContentsMargins(0, 0, 0, 0);
-        cv->setSpacing(10);
-
-        auto *modeRow = new QWidget();
-        auto *mh = new QHBoxLayout(modeRow);
-        mh->setContentsMargins(0, 0, 0, 0);
-        m_darkR = new QRadioButton(QStringLiteral("深色模式"), modeRow);
-        m_lightR = new QRadioButton(QStringLiteral("浅色模式"), modeRow);
-        const bool dark = Win11Style::darkMode();
-        (dark ? m_darkR : m_lightR)->setChecked(true);
-        QObject::connect(m_darkR, &QRadioButton::toggled, this, [this](bool on) {
-            QSettings s(QStringLiteral("elevende"), QStringLiteral("elevende"));
-            s.setValue(QStringLiteral("darkMode"), on);
-        });
-        mh->addWidget(m_darkR);
-        mh->addWidget(m_lightR);
-        mh->addStretch(1);
-        cv->addWidget(modeRow);
-
-        /* accent swatches (Win11 palette) */
-        auto *accentLbl = new QLabel(QStringLiteral("强调色（作用于 ElevenDE 自带应用，重启应用后生效）"), colorBody);
-        accentLbl->setProperty("subtle", true);
-        cv->addWidget(accentLbl);
-        auto *swatchRow = new QWidget();
-        auto *sh = new QHBoxLayout(swatchRow);
-        sh->setContentsMargins(0, 0, 0, 0);
-        sh->setSpacing(8);
-        const QStringList accents = {
-            QStringLiteral("#0078D4"), QStringLiteral("#4CC2FF"), QStringLiteral("#0067C0"),
-            QStringLiteral("#6B69D6"), QStringLiteral("#8961DD"), QStringLiteral("#E3008C"),
-            QStringLiteral("#E81123"), QStringLiteral("#CA5010"), QStringLiteral("#F7630C"),
-            QStringLiteral("#FFB900"), QStringLiteral("#107C10"), QStringLiteral("#038387"),
-        };
-        QSettings s(QStringLiteral("elevende"), QStringLiteral("elevende"));
-        const QString cur = s.value(QStringLiteral("accent"), QStringLiteral("#0078D4")).toString();
-        for (const QString &hex : accents) {
-            auto *b = new QPushButton(swatchRow);
-            b->setFixedSize(30, 30);
-            b->setCursor(Qt::PointingHandCursor);
-            b->setToolTip(hex);
-            const bool sel = hex.compare(cur, Qt::CaseInsensitive) == 0;
-            b->setStyleSheet(QStringLiteral(
-                "QPushButton { background:%1; border:2px solid %2; border-radius:15px; }"
-                "QPushButton:hover { border:2px solid #FFFFFF; }")
-                .arg(hex, sel ? QStringLiteral("#FFFFFF") : QStringLiteral("transparent")));
-            QObject::connect(b, &QPushButton::clicked, this, [this, hex] {
-                QSettings st(QStringLiteral("elevende"), QStringLiteral("elevende"));
-                st.setValue(QStringLiteral("accent"), hex);
-                QMessageBox::information(this, QStringLiteral("个性化"),
-                                         QStringLiteral("强调色已保存。ElevenDE 自带应用将在下次启动时使用新颜色。"));
-            });
-            sh->addWidget(b);
-        }
-        sh->addStretch(1);
-        cv->addWidget(swatchRow);
-
-        v->addWidget(makeCard(QStringLiteral("颜色"), colorBody));
+        /* ElevenDE Settings is intentionally light-only. Color and accent
+           controls are not exposed because the shell uses one consistent
+           Windows 11 light surface across all built-in applications. */
+        QSettings appearance(QStringLiteral("elevende"), QStringLiteral("elevende"));
+        appearance.setValue(QStringLiteral("darkMode"), false);
+        auto *lightNote = new QLabel(QStringLiteral("ElevenDE 使用统一的 Windows 11 浅色界面。"), outer);
+        lightNote->setProperty("subtle", true);
+        v->addWidget(lightNote);
         v->addStretch(1);
 
         auto *lay = new QVBoxLayout(this);
@@ -418,7 +476,15 @@ private:
             for (const QString &n : wdir.entryList({ QStringLiteral("*.png") }, QDir::Files))
                 candidates << wdir.absoluteFilePath(n);
         const QString custom = userWallpaperPath();
-        if (QFileInfo::exists(custom) && !candidates.contains(custom))
+        QSettings wallpaperState(QStringLiteral("elevende"), QStringLiteral("elevende"));
+        const QString selectedSource = wallpaperState.value(
+            QStringLiteral("wallpaperSource")).toString();
+        /* The active copy is always stored at `custom`.  Do not add it as a
+           fourth card when it merely mirrors one of the built-in candidates;
+           keep it visible only for an image picked from outside this list. */
+        const bool activeCopyMirrorsBuiltin = candidates.contains(selectedSource);
+        if (QFileInfo::exists(custom) && !activeCopyMirrorsBuiltin &&
+            !candidates.contains(custom))
             candidates << custom;
 
         if (candidates.isEmpty()) {
@@ -438,7 +504,7 @@ private:
                 b->setIconSize(QSize(156, 86));
             }
             b->setStyleSheet(QStringLiteral(
-                "QPushButton { border:2px solid #3D3D3D; border-radius:6px; padding:0; background:#1A1A1A; }"
+                "QPushButton { border:2px solid #d7dde5; border-radius:6px; padding:0; background:#ffffff; }"
                 "QPushButton:hover { border:2px solid #0078D4; }"));
             QObject::connect(b, &QPushButton::clicked, this, [this, path] { applyWallpaper(path); });
             wg->addWidget(b);
@@ -450,20 +516,34 @@ private:
     {
         const QString dst = userWallpaperPath();
         QDir().mkpath(QFileInfo(dst).absolutePath());
-        if (QFileInfo(src).absolutePath() != QFileInfo(dst).absolutePath()) {
+        /* Copy through a temporary path then atomically replace the active
+           wallpaper. The old code skipped copying whenever source and target
+           merely shared a directory, leaving stale or missing wallpaper data. */
+        if (QFileInfo(src).canonicalFilePath() != QFileInfo(dst).canonicalFilePath()) {
+            const QString tmp = dst + QStringLiteral(".new");
+            QFile::remove(tmp);
+            if (!QFile::copy(src, tmp)) {
+                QFile::remove(tmp);
+                QMessageBox::critical(this, QStringLiteral("个性化"),
+                                      QStringLiteral("无法写入 %1").arg(dst));
+                return;
+            }
             QFile::remove(dst);
-            if (!QFile::copy(src, dst)) {
+            if (!QFile::rename(tmp, dst)) {
+                QFile::remove(tmp);
                 QMessageBox::critical(this, QStringLiteral("个性化"),
                                       QStringLiteral("无法写入 %1").arg(dst));
                 return;
             }
         }
+        QSettings wallpaperState(QStringLiteral("elevende"), QStringLiteral("elevende"));
+        wallpaperState.setValue(QStringLiteral("wallpaperSource"), src);
+        rebuildWallpapers();
         notifyShellWallpaperChanged();
     }
 
     QWidget *m_wallGrid;
-    QRadioButton *m_darkR;
-    QRadioButton *m_lightR;
+
 };
 
 /* ---------- 显示 ---------- */
@@ -974,46 +1054,121 @@ class SettingsWindow : public QWidget
 public:
     explicit SettingsWindow(int initialPage = 0)
     {
+        setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
         setWindowTitle(QStringLiteral("设置"));
         setWindowIcon(Win11Style::appIcon(QStringLiteral("preferences-system")));
-        resize(1000, 660);
+        resize(1280, 820);
+        setMinimumSize(1040, 700);
+        setProperty("settingsRoot", true);
 
-        auto *root = new QHBoxLayout(this);
+        auto *root = new QVBoxLayout(this);
         root->setContentsMargins(0, 0, 0, 0);
         root->setSpacing(0);
 
-        /* sidebar */
-        m_nav = new QListWidget();
-        m_nav->setFixedWidth(232);
-        m_nav->setIconSize(QSize(20, 20));
-        m_nav->setSpacing(2);
+        /* Settings is intentionally a light Windows 11 surface. Do not inherit
+           the desktop dark palette here; it creates a black/white split. */
+        setProperty("forceLightSurface", true);
+        setStyleSheet(QStringLiteral(
+            "QWidget[settingsRoot=true] { background: #f5f6fb; color: #202020; }"
+            "QWidget[topBar=true] { background: #f7f8fc; border-bottom: 1px solid #e5e8ef; }"
+            "QToolButton[windowControl=true] { background: transparent; color: #202020; border: none; border-radius: 0; font-size: 15px; }"
+            "QToolButton[windowControl=true]:hover { background: #e5e8ef; }"
+            "QToolButton[windowClose=true]:hover { background: #c42b1c; color: white; }"
+            "QWidget[settingsSidebar=true] { background: #f3f4f9; border-right: 1px solid #e5e8ef; }"
+            "QWidget[settingsContent=true] { background: #f5f6fb; }"
+            "QLabel { color: #202020; background: transparent; }"
+            "QLabel[subtle=true] { color: #6d6f78; }"
+            "QLabel[link=true] { color: #0067c0; }"
+            "QLabel[accountAvatar=true] { background: qradialgradient(cx:.30, cy:.25, radius:1, stop:0 #b8d8f6, stop:.45 #8fb5ec, stop:1 #6f75cb); color: white; border-radius: 31px; }"
+            "QLabel[devicePreview=true] { background: #ddeef8; color: #1681c3; border: 1px solid #c9dce9; border-radius: 8px; }"
+            "QLabel[deviceState=true] { color: #202020; min-width: 120px; }"
+            "QLabel[cloudMark=true] { color: #0b75d1; }"
+            "QFrame[usageBar=true] { background: #0879d1; border-radius: 2px; max-width: 130px; }"
+            "QWidget[homeRow=true] { background: transparent; border-top: 1px solid #e9ebf0; }"
+            "QWidget[homeRow=true]:hover { background: #f7f9fc; }"
+            "QLabel[homeGlyph=true] { color: #166fc3; }"
+            "QLineEdit[settingsSearch=true] { background: #ffffff; color: #202020; border: 1px solid #dfe3ea; border-bottom: 2px solid #0879d1; border-radius: 20px; padding: 8px 16px; }"
+            "QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit { background: #ffffff; color: #202020; border: 1px solid #d1d5db; }"
+            "QPushButton { background: #ffffff; color: #202020; border: 1px solid #d1d5db; border-radius: 5px; }"
+            "QPushButton:hover { background: #f3f6fa; }"
+            "QPushButton#settingsHomeRow { text-align: left; padding: 0; border: none; border-radius: 0; background: transparent; }"
+            "QPushButton#settingsHomeRow:hover { background: #f7f9fc; }"));
+
+        auto *top = new QWidget(this);
+        top->setProperty("topBar", true);
+        top->setFixedHeight(64);
+        top->installEventFilter(this);
+        auto *th = new QHBoxLayout(top);
+        th->setContentsMargins(18, 8, 20, 8); th->setSpacing(16);
+        auto *back = new QLabel(QStringLiteral("‹"), top);
+        QFont backf = back->font(); backf.setPointSizeF(26); back->setFont(backf);
+        back->setFixedWidth(24); back->setAlignment(Qt::AlignCenter);
+        auto *title = new QLabel(QStringLiteral("设置"), top);
+        QFont titlef = title->font(); titlef.setPointSizeF(11); titlef.setWeight(QFont::DemiBold); title->setFont(titlef);
+        auto *search = new QLineEdit(top);
+        search->setObjectName(QStringLiteral("settingsSearch"));
+        search->setProperty("settingsSearch", true);
+        search->setPlaceholderText(QStringLiteral("⌕  查找设置"));
+        search->setFixedWidth(520); search->setFixedHeight(38);
+        back->installEventFilter(this); title->installEventFilter(this);
+        th->addWidget(back); th->addWidget(title); th->addStretch(1); th->addWidget(search);
+        th->addSpacing(12);
+        auto *minimize = new QToolButton(top); minimize->setProperty("windowControl", true); minimize->setText(QStringLiteral("—")); minimize->setFixedSize(44, 48);
+        auto *maximize = new QToolButton(top); maximize->setProperty("windowControl", true); maximize->setText(QStringLiteral("□")); maximize->setFixedSize(44, 48);
+        auto *close = new QToolButton(top); close->setProperty("windowControl", true); close->setProperty("windowClose", true); close->setText(QStringLiteral("×")); close->setFixedSize(44, 48);
+        QObject::connect(minimize, &QToolButton::clicked, this, &QWidget::showMinimized);
+        QObject::connect(maximize, &QToolButton::clicked, this, [this] { isMaximized() ? showNormal() : showMaximized(); });
+        QObject::connect(close, &QToolButton::clicked, this, &QWidget::close);
+        th->addWidget(minimize); th->addWidget(maximize); th->addWidget(close);
+        root->addWidget(top);
+
+        auto *body = new QWidget(this);
+        body->setProperty("settingsContent", true);
+        auto *bodyLayout = new QHBoxLayout(body);
+        bodyLayout->setContentsMargins(0, 0, 0, 0); bodyLayout->setSpacing(0);
+        auto *sidebar = new QWidget(body);
+        sidebar->setProperty("settingsSidebar", true); sidebar->setFixedWidth(286);
+        auto *sv = new QVBoxLayout(sidebar);
+        sv->setContentsMargins(18, 22, 12, 18); sv->setSpacing(14);
+        auto *account = new QWidget(sidebar);
+        auto *ah = new QHBoxLayout(account); ah->setContentsMargins(0, 0, 0, 0); ah->setSpacing(12);
+        auto *avatar = new QLabel(QStringLiteral("L"), account);
+        avatar->setProperty("accountAvatar", true); avatar->setAlignment(Qt::AlignCenter); avatar->setFixedSize(62, 62);
+        QFont avf = avatar->font(); avf.setPointSizeF(22); avf.setWeight(QFont::DemiBold); avatar->setFont(avf);
+        auto *accountText = new QWidget(account); auto *atv = new QVBoxLayout(accountText);
+        atv->setContentsMargins(0, 5, 0, 0); atv->setSpacing(2);
+        auto *name = new QLabel(qEnvironmentVariable("USER", QStringLiteral("Lindows 用户")), accountText);
+        QFont nf = name->font(); nf.setPointSizeF(10.5); nf.setBold(true); name->setFont(nf);
+        auto *mail = new QLabel(QStringLiteral("本地账户"), accountText); mail->setProperty("subtle", true);
+        atv->addWidget(name); atv->addWidget(mail); atv->addStretch(1);
+        ah->addWidget(avatar); ah->addWidget(accountText, 1); sv->addWidget(account);
+
+        m_nav = new QListWidget(sidebar);
+        m_nav->setIconSize(QSize(22, 22)); m_nav->setSpacing(2);
         m_nav->setStyleSheet(QStringLiteral(
-            "QListWidget { background: transparent; border: none; }"
-            "QListWidget::item { padding: 9px 14px; border-radius: 6px; margin: 1px 8px; }"
-            "QListWidget::item:hover { background: rgba(255,255,255,0.06); }"
-            "QListWidget::item:selected { background: rgba(255,255,255,0.09); }"));
-
-        /* Font-safe line glyphs avoid emoji/tofu fallbacks while keeping a
-           compact, restrained Windows-style navigation rail. */
-        struct NavItem { const char *icon; const char *label; };
+            "QListWidget { background: transparent; color: #202020; border: none; }"
+            "QListWidget::item { color: #202020; padding: 9px 12px; border-radius: 6px; margin: 1px 0; }"
+            "QListWidget::item:hover { background: #e9edf5; }"
+            "QListWidget::item:selected { background: #e5e9f2; color: #1f1f1f; border-left: 3px solid #0879d1; }"));
+        struct NavItem { const char *iconName; const char *label; };
         const NavItem items[] = {
-            { "\xE2\x96\xA3", "系统" },       /* ▣ */
-            { "\xE2\x97\x90", "个性化" },     /* ◐ */
-            { "\xE2\x96\xAD", "显示" },       /* ▭ */
-            { "\xE2\x97\x8C", "网络" },       /* ○ */
-            { "\xE2\x99\xAA", "声音" },       /* ♪ */
-            { "\xE2\x8C\xA8", "快捷键" },     /* ⌨ */
-            { "\xE2\x97\xB7", "时间和语言" }, /* ◷ */
-            { "\xE2\x96\xA1", "默认应用" },   /* □ */
-            { "\xE2\x97\xA6", "鼠标" },       /* ◦ */
-            { "\xE2\x8F\xBB", "电源" },       /* ⏻ */
-            { "\xE2\x97\x8F", "用户" },       /* ● */
+            { "settings-nav-home", "主页" }, { "settings-nav-system", "系统" },
+            { "settings-nav-personalization", "个性化" }, { "settings-nav-display", "显示" },
+            { "settings-nav-network", "网络和 Internet" }, { "settings-nav-sound", "声音" },
+            { "settings-nav-shortcuts", "快捷键" }, { "settings-nav-time", "时间和语言" },
+            { "settings-nav-apps", "默认应用" }, { "settings-nav-mouse", "鼠标" },
+            { "settings-nav-power", "电源" }, { "settings-nav-users", "用户" }
         };
-        for (const NavItem &it : items)
-            m_nav->addItem(new QListWidgetItem(
-                QIcon(), QStringLiteral("%1  %2").arg(QString::fromUtf8(it.icon), QString::fromUtf8(it.label))));
+        for (const NavItem &it : items) {
+            auto *item = new QListWidgetItem(Win11Style::appIcon(QString::fromUtf8(it.iconName)),
+                                               QString::fromUtf8(it.label));
+            item->setSizeHint(QSize(0, 42));
+            m_nav->addItem(item);
+        }
+        sv->addWidget(m_nav, 1);
 
-        m_stack = new QStackedWidget();
+        m_stack = new QStackedWidget(body);
+        m_stack->addWidget(buildHomePage());
         m_stack->addWidget(buildAboutPage());
         m_stack->addWidget(new PersonalizationPage());
         m_stack->addWidget(new DisplayPage());
@@ -1025,19 +1180,59 @@ public:
         m_stack->addWidget(ElevenSettings::buildMousePage());
         m_stack->addWidget(ElevenSettings::buildPowerPage());
         m_stack->addWidget(ElevenSettings::buildUsersPage());
-
         QObject::connect(m_nav, &QListWidget::currentRowChanged, m_stack, &QStackedWidget::setCurrentIndex);
-        if (initialPage < 0 || initialPage >= m_nav->count())
-            initialPage = 0;
+        QObject::connect(m_nav, &QListWidget::currentRowChanged, this, [search](int row) {
+            if (row == 0) {
+                search->clear();
+                search->clearFocus();
+            }
+        });
+        for (QWidget *row : findChildren<QWidget *>(QStringLiteral("settingsHomeRow")))
+            row->installEventFilter(this);
+        if (initialPage < 0 || initialPage >= m_nav->count()) initialPage = 0;
         m_nav->setCurrentRow(initialPage);
+        bodyLayout->addWidget(sidebar);
+        bodyLayout->addWidget(m_stack, 1);
+        root->addWidget(body, 1);
+    }
 
-        root->addWidget(m_nav);
-        root->addWidget(m_stack, 1);
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (event->type() == QEvent::MouseButtonPress &&
+            watched && (watched->property("topBar").toBool() ||
+                        watched->parent() && watched->parent()->property("topBar").toBool())) {
+            auto *me = static_cast<QMouseEvent *>(event);
+            if (me->button() == Qt::LeftButton) {
+                m_dragOffset = me->globalPosition().toPoint() - frameGeometry().topLeft();
+                m_dragging = true;
+                return true;
+            }
+        }
+        if (event->type() == QEvent::MouseMove && m_dragging) {
+            auto *me = static_cast<QMouseEvent *>(event);
+            move(me->globalPosition().toPoint() - m_dragOffset);
+            return true;
+        }
+        if (event->type() == QEvent::MouseButtonRelease && m_dragging) {
+            m_dragging = false;
+            return true;
+        }
+        if (event->type() == QEvent::MouseButtonRelease &&
+            watched && watched->objectName() == QStringLiteral("settingsHomeRow")) {
+            const int target = watched->property("settingsPageIndex").toInt();
+            if (target >= 0 && target < m_nav->count()) {
+                m_nav->setCurrentRow(target);
+                return true;
+            }
+        }
+        return QWidget::eventFilter(watched, event);
     }
 
 private:
     QListWidget *m_nav;
     QStackedWidget *m_stack;
+    QPoint m_dragOffset;
+    bool m_dragging = false;
 };
 
 } // namespace
@@ -1049,10 +1244,9 @@ int main(int argc, char **argv)
     QApplication::setOrganizationName(QStringLiteral("elevende"));
     Win11Style::apply(app);
 
-    /* --page personalization|display|network|sound|shortcuts|datetime|
-       defaults|mouse|power|users|about  (or a numeric index) lets other
-       components deep-link into a page, e.g. the desktop context menu:
-       elevende-settings --page personalization */
+    /* --page home|about|personalization|display|network|sound|shortcuts|
+       datetime|defaults|mouse|power|users (or a numeric index) deep-links
+       into the Windows 11-style Settings shell. */
     int page = 0;
     const QStringList args = app.arguments();
     for (int i = 1; i < args.size(); ++i) {
@@ -1060,7 +1254,7 @@ int main(int argc, char **argv)
              args.at(i) == QLatin1String("-p")) && i + 1 < args.size()) {
             const QString p = args.at(++i).toLower();
             static const char *order[] = {
-                "about", "personalization", "display", "network", "sound",
+                "home", "about", "personalization", "display", "network", "sound",
                 "shortcuts", "datetime", "defaults", "mouse", "power", "users"
             };
             bool isNum = false;

@@ -2,7 +2,7 @@
 Type=Application
 Name=终端 (XTerm)
 Comment=X11 terminal emulator (via XWayland)
-Exec=xterm -fa Monospace -fs 11
+Exec=xterm -fa Monospace -fs 11 -xrm "XTerm*background:#111417" -xrm "XTerm*foreground:#e6e6e6" -xrm "XTerm*cursorColor:#ffffff"
 Icon=utilities-terminal-symbolic
 Terminal=false
 Categories=System;TerminalEmulator;

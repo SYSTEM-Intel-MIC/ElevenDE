@@ -37,6 +37,7 @@
 #include <signal.h>
 #include <sys/sysinfo.h>
 #include <unistd.h>
+#include <cstdio>
 
 #include "../common/win11style.h"
 
@@ -249,9 +250,10 @@ protected:
     {
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
-        p.fillRect(rect(), QColor(32, 32, 38));
-        /* grid */
-        p.setPen(QPen(QColor(60, 60, 68), 1));
+        const QColor base = palette().color(QPalette::Base);
+        const QColor grid = palette().color(QPalette::Mid);
+        p.fillRect(rect(), base);
+        p.setPen(QPen(grid.lighter(125), 1));
         for (int i = 1; i < 4; ++i)
             p.drawLine(0, height() * i / 4, width(), height() * i / 4);
         if (m_data.size() < 2)
@@ -274,8 +276,11 @@ protected:
         QColor fc = m_line;
         fc.setAlpha(40);
         p.fillPath(fill, fc);
-        p.setPen(QPen(m_line, 2));
+        p.setPen(QPen(m_line, 1.4));
         p.drawPath(path);
+        p.setPen(QPen(grid, 1));
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(rect().adjusted(0, 0, -1, -1));
     }
 private:
     QColor m_line;
@@ -284,70 +289,139 @@ private:
 
 /* ============================ performance page ============================ */
 
+static QVector<double> readCoreCpu()
+{
+    QFile f(QStringLiteral("/proc/stat"));
+    if (!f.open(QIODevice::ReadOnly))
+        return {};
+    static QVector<quint64> previousTotal;
+    static QVector<quint64> previousIdle;
+    QVector<double> result;
+    QVector<quint64> totals;
+    QVector<quint64> idles;
+    for (;;) {
+        const QByteArray line = f.readLine();
+        if (line.isEmpty())
+            break;
+        int core = -1;
+        unsigned long long user = 0, nice = 0, system = 0, idle = 0,
+                           iowait = 0, irq = 0, softirq = 0, steal = 0;
+        const int fields = std::sscanf(line.constData(), "cpu%d %llu %llu %llu %llu %llu %llu %llu %llu",
+                                       &core, &user, &nice, &system, &idle,
+                                       &iowait, &irq, &softirq, &steal);
+        if (core < 0 || fields < 5)
+            continue;
+        totals.append(user + nice + system + idle + iowait + irq + softirq + steal);
+        idles.append(idle + iowait);
+    }
+    result.resize(totals.size());
+    for (int i = 0; i < totals.size(); ++i) {
+        if (i < previousTotal.size() && totals.at(i) > previousTotal.at(i)) {
+            const quint64 dt = totals.at(i) - previousTotal.at(i);
+            const quint64 di = idles.at(i) > previousIdle.at(i)
+                ? idles.at(i) - previousIdle.at(i) : 0;
+            result[i] = qBound(0.0, 100.0 * (double)(dt - qMin(dt, di)) / dt, 100.0);
+        }
+    }
+    previousTotal = totals;
+    previousIdle = idles;
+    return result;
+}
+
 class PerformancePage : public QWidget
 {
 public:
     PerformancePage()
     {
         auto *root = new QVBoxLayout(this);
-        root->setContentsMargins(16, 16, 16, 16);
-        root->setSpacing(12);
-
+        root->setContentsMargins(18, 16, 18, 14);
+        root->setSpacing(9);
         m_timer = new QTimer(this);
 
-        /* CPU card */
-        auto *cpuCard = new QWidget();
-        cpuCard->setProperty("card", true);
-        auto *cv = new QVBoxLayout(cpuCard);
-        cv->setContentsMargins(16, 12, 16, 12);
-        m_cpuTitle = new QLabel(QStringLiteral("CPU"), cpuCard);
-        QFont tf = m_cpuTitle->font();
-        tf.setPointSizeF(12);
-        tf.setBold(true);
-        m_cpuTitle->setFont(tf);
-        m_cpuPct = new QLabel(QStringLiteral("0%"), cpuCard);
-        QFont pf = m_cpuPct->font();
-        pf.setPointSizeF(22);
-        m_cpuPct->setFont(pf);
-        m_cpuGraph = new Graph(QColor(0x4C, 0xC2, 0xFF), cpuCard);
-        m_cpuStats = new QLabel(cpuCard);
-        m_cpuStats->setProperty("subtle", true);
-        auto *ch = new QHBoxLayout();
-        ch->addWidget(m_cpuTitle);
-        ch->addStretch(1);
-        ch->addWidget(m_cpuPct);
-        cv->addLayout(ch);
-        cv->addWidget(m_cpuGraph, 1);
-        cv->addWidget(m_cpuStats);
-        root->addWidget(cpuCard, 3);
+        auto *header = new QHBoxLayout;
+        header->setContentsMargins(2, 0, 2, 0);
+        auto *titleBox = new QVBoxLayout;
+        titleBox->setSpacing(0);
+        auto *title = new QLabel(QStringLiteral("CPU"), this);
+        QFont titleFont = title->font();
+        titleFont.setPointSizeF(22);
+        titleFont.setBold(false);
+        title->setFont(titleFont);
+        titleBox->addWidget(title);
+        auto *subtitle = new QLabel(QStringLiteral("60 秒内的利用率"), this);
+        subtitle->setProperty("subtle", true);
+        titleBox->addWidget(subtitle);
+        header->addLayout(titleBox);
+        header->addStretch(1);
+        m_cpuPct = new QLabel(QStringLiteral("0%"), this);
+        QFont pctFont = m_cpuPct->font();
+        pctFont.setPointSizeF(17);
+        m_cpuPct->setFont(pctFont);
+        header->addWidget(m_cpuPct, 0, Qt::AlignBottom);
+        header->addSpacing(12);
+        m_modelLabel = new QLabel(cpuModelName(), this);
+        m_modelLabel->setAlignment(Qt::AlignRight | Qt::AlignBottom);
+        m_modelLabel->setMinimumWidth(250);
+        header->addWidget(m_modelLabel, 0, Qt::AlignBottom);
+        root->addLayout(header);
 
-        /* Memory card */
-        auto *memCard = new QWidget();
-        memCard->setProperty("card", true);
-        auto *mv = new QVBoxLayout(memCard);
-        mv->setContentsMargins(16, 12, 16, 12);
-        auto *memTitle = new QLabel(QStringLiteral("内存"), memCard);
-        memTitle->setFont(tf);
-        m_memPct = new QLabel(QStringLiteral("0%"), memCard);
-        m_memPct->setFont(pf);
-        m_memGraph = new Graph(QColor(0x6B, 0x69, 0xD6), memCard);
-        m_memStats = new QLabel(memCard);
-        m_memStats->setProperty("subtle", true);
-        auto *mh = new QHBoxLayout();
-        mh->addWidget(memTitle);
-        mh->addStretch(1);
-        mh->addWidget(m_memPct);
-        mv->addLayout(mh);
-        mv->addWidget(m_memGraph, 1);
-        mv->addWidget(m_memStats);
-        root->addWidget(memCard, 3);
+        auto *graphs = new QGridLayout;
+        graphs->setContentsMargins(0, 0, 0, 0);
+        graphs->setHorizontalSpacing(6);
+        graphs->setVerticalSpacing(6);
+        const QColor colors[] = { QColor(0x54, 0x9E, 0xB5), QColor(0x66, 0xA6, 0xB8),
+                                   QColor(0x54, 0x9E, 0xB5), QColor(0x66, 0xA6, 0xB8) };
+        for (int i = 0; i < 4; ++i) {
+            auto *cell = new QWidget(this);
+            cell->setProperty("graphCell", true);
+            auto *v = new QVBoxLayout(cell);
+            v->setContentsMargins(0, 0, 0, 0);
+            v->setSpacing(0);
+            auto *label = new QLabel(QStringLiteral("CPU %1").arg(i), cell);
+            label->setProperty("subtle", true);
+            label->setContentsMargins(7, 3, 0, 2);
+            v->addWidget(label);
+            m_coreGraphs[i] = new Graph(colors[i], cell);
+            m_coreGraphs[i]->setMinimumHeight(142);
+            v->addWidget(m_coreGraphs[i], 1);
+            graphs->addWidget(cell, i / 2, i % 2);
+        }
+        root->addLayout(graphs, 1);
 
-        m_cpuStats->setText(QStringLiteral("%1 · %2 核 · 运行时间 %3")
-                                .arg(cpuModelName())
-                                .arg(g_ncores)
-                                .arg(uptimeStr()));
+        auto *details = new QGridLayout;
+        details->setContentsMargins(0, 3, 0, 0);
+        details->setHorizontalSpacing(30);
+        details->setVerticalSpacing(4);
+        auto addMetric = [&](int row, int col, const QString &name, QLabel **value) {
+            auto *box = new QWidget(this);
+            auto *v = new QVBoxLayout(box);
+            v->setContentsMargins(0, 0, 0, 0);
+            v->setSpacing(1);
+            auto *n = new QLabel(name, box);
+            n->setProperty("subtle", true);
+            auto *val = new QLabel(QStringLiteral("—"), box);
+            QFont f = val->font();
+            f.setPointSizeF(12);
+            val->setFont(f);
+            v->addWidget(n);
+            v->addWidget(val);
+            details->addWidget(box, row, col);
+            *value = val;
+        };
+        addMetric(0, 0, QStringLiteral("利用率"), &m_usage);
+        addMetric(0, 1, QStringLiteral("速度"), &m_speed);
+        addMetric(0, 2, QStringLiteral("进程"), &m_processes);
+        addMetric(0, 3, QStringLiteral("线程"), &m_threads);
+        addMetric(1, 0, QStringLiteral("正常运行时间"), &m_uptime);
+        addMetric(1, 1, QStringLiteral("逻辑处理器"), &m_logical);
+        addMetric(1, 2, QStringLiteral("基准速度"), &m_baseSpeed);
+        m_detailModel = new QLabel(cpuModelName(), this);
+        m_detailModel->setProperty("subtle", true);
+        details->addWidget(m_detailModel, 1, 3);
+        root->addLayout(details);
+
         m_timer->setInterval(1000);
-        QObject::connect(m_timer, &QTimer::timeout, this, &PerformancePage::sample);
+        connect(m_timer, &QTimer::timeout, this, &PerformancePage::sample);
         m_timer->start();
         sample();
     }
@@ -364,55 +438,82 @@ private:
             .arg((s % 3600) / 60, 2, 10, QLatin1Char('0'))
             .arg(s % 60, 2, 10, QLatin1Char('0'));
     }
-    void sample()
+
+    static QString cpuMHz()
     {
-        static quint64 prevTotal = 0;
-        const quint64 now = readTotalCpuTicks();
-        double cpuPct = 0;
-        if (prevTotal && now > prevTotal) {
-            /* busy = total delta - idle delta; approximate with total only */
-            QFile f(QStringLiteral("/proc/stat"));
-            if (f.open(QIODevice::ReadOnly)) {
-                const QList<QByteArray> parts = f.readLine().simplified().split(' ');
-                if (parts.size() > 4) {
-                    const quint64 idle = parts.at(4).toULongLong();
-                    static quint64 prevIdle = 0;
-                    const quint64 dt = now - prevTotal;
-                    const quint64 di = idle > prevIdle ? idle - prevIdle : 0;
-                    cpuPct = dt ? 100.0 * (double)(dt - di) / dt : 0;
-                    prevIdle = idle;
+        QFile f(QStringLiteral("/proc/cpuinfo"));
+        if (!f.open(QIODevice::ReadOnly))
+            return QStringLiteral("—");
+        for (;;) {
+            const QString line = QString::fromUtf8(f.readLine());
+            if (line.isEmpty())
+                break;
+            if (line.startsWith(QStringLiteral("cpu MHz")))
+                return QStringLiteral("%1 GHz").arg(line.section(QLatin1Char(':'), 1).trimmed().toDouble() / 1000.0, 0, 'f', 2);
+        }
+        return QStringLiteral("—");
+    }
+
+    static int threadCount()
+    {
+        int count = 0;
+        const QStringList entries = QDir(QStringLiteral("/proc")).entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const QString &pid : entries) {
+            bool ok = false;
+            pid.toLongLong(&ok);
+            if (!ok) continue;
+            QFile f(QStringLiteral("/proc/%1/status").arg(pid));
+            if (!f.open(QIODevice::ReadOnly)) continue;
+            for (;;) {
+                const QByteArray line = f.readLine();
+                if (line.isEmpty())
+                    break;
+                if (line.startsWith("Threads:")) {
+                    count += line.mid(line.indexOf('\t') + 1).trimmed().toInt();
+                    break;
                 }
             }
         }
-        prevTotal = now;
-        m_cpuPct->setText(QStringLiteral("%1%").arg(cpuPct, 0, 'f', 0));
-        m_cpuGraph->push(cpuPct);
-        m_cpuStats->setText(QStringLiteral("%1 · %2 核 · 运行时间 %3")
-                                .arg(cpuModelName())
-                                .arg(g_ncores)
-                                .arg(uptimeStr()));
+        return count;
+    }
 
+    void sample()
+    {
+        const QVector<double> cores = readCoreCpu();
+        if (!cores.isEmpty()) {
+            double average = 0;
+            for (int i = 0; i < 4; ++i) {
+                const double value = i < cores.size() ? cores.at(i) : 0;
+                m_coreGraphs[i]->push(value);
+                average += value;
+            }
+            average /= 4.0;
+            m_cpuPct->setText(QStringLiteral("%1%").arg(average, 0, 'f', 0));
+            m_usage->setText(QStringLiteral("%1%").arg(average, 0, 'f', 0));
+        }
         struct sysinfo si;
         if (sysinfo(&si) == 0) {
-            const double usedGb = (si.totalram - si.freeram) / (1024.0 * 1024 * 1024);
-            const double totGb = si.totalram / (1024.0 * 1024 * 1024);
-            const double pct = totGb > 0 ? usedGb / totGb * 100.0 : 0;
-            m_memPct->setText(QStringLiteral("%1%").arg(pct, 0, 'f', 0));
-            m_memGraph->push(pct);
-            m_memStats->setText(QStringLiteral("已用 %1 GB / 共 %2 GB")
-                                    .arg(usedGb, 0, 'f', 1)
-                                    .arg(totGb, 0, 'f', 1));
+            m_speed->setText(cpuMHz());
+            m_processes->setText(QString::number(scanAll().size()));
+            m_threads->setText(QString::number(threadCount()));
+            m_uptime->setText(uptimeStr());
         }
+        m_logical->setText(QString::number(g_ncores));
+        m_baseSpeed->setText(cpuMHz());
     }
 
     QTimer *m_timer;
-    QLabel *m_cpuTitle;
     QLabel *m_cpuPct;
-    QLabel *m_cpuStats;
-    Graph *m_cpuGraph;
-    QLabel *m_memPct;
-    QLabel *m_memStats;
-    Graph *m_memGraph;
+    QLabel *m_modelLabel;
+    QLabel *m_detailModel;
+    QLabel *m_usage;
+    QLabel *m_speed;
+    QLabel *m_processes;
+    QLabel *m_threads;
+    QLabel *m_uptime;
+    QLabel *m_logical;
+    QLabel *m_baseSpeed;
+    Graph *m_coreGraphs[4]{};
 };
 
 /* ============================ processes page ============================ */
@@ -601,16 +702,11 @@ public:
 
         /* ---- left icon rail (Win11 style) ---- */
         auto *rail = new QWidget();
-        rail->setFixedWidth(56);
-        rail->setStyleSheet(QStringLiteral(
-            "QWidget { background: rgba(255,255,255,0.03); border-right: 1px solid #3d3d3d; }"
-            "QToolButton { background: transparent; border: none; border-radius: 6px;"
-            " font-size: 17px; padding: 8px 0; margin: 2px 8px; color: #cfcfcf; }"
-            "QToolButton:hover { background: rgba(255,255,255,0.07); }"
-            "QToolButton:checked { background: rgba(255,255,255,0.10); color: #ffffff; }"));
+        rail->setFixedWidth(188);
+        rail->setProperty("navRail", true);
         auto *rv = new QVBoxLayout(rail);
-        rv->setContentsMargins(0, 10, 0, 10);
-        rv->setSpacing(2);
+        rv->setContentsMargins(8, 12, 8, 12);
+        rv->setSpacing(4);
 
         struct RailItem { const char *glyph; const char *tip; };
         const RailItem items[] = {
@@ -622,10 +718,10 @@ public:
         group->setExclusive(true);
         for (size_t i = 0; i < sizeof items / sizeof items[0]; ++i) {
             auto *b = new QToolButton(rail);
-            b->setText(QString::fromUtf8(items[i].glyph));
+            b->setText(QString::fromUtf8(items[i].glyph) + QStringLiteral("  ") + QString::fromUtf8(items[i].tip));
             b->setToolTip(QString::fromUtf8(items[i].tip));
             b->setCheckable(true);
-            b->setFixedHeight(40);
+            b->setFixedHeight(44);
             b->setCursor(Qt::PointingHandCursor);
             rv->addWidget(b);
             group->addButton(b, (int)i);

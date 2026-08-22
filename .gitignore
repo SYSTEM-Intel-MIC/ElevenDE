@@ -1,0 +1,32 @@
+# Generated Debian packages and local build directories
+/*.deb
+/build/
+
+# Locally compiled executables
+/shell/elevende-shell
+/shell/elevende-lock
+/shell/elevende-notifyd
+/runbox-linux/runbox
+
+# Local test harnesses, logs and screenshot evidence
+/*.log
+/lindows-*.png
+/run-candidates.png
+/crop_taskbar.py
+/inspect_run_candidates.py
+/test_interactions.sh
+/test_wallpaper_notify.c
+/*_visual_findings.txt
+/*_regression_notes.txt
+/fluent_icon_audit.txt
+/ELEVENDE-MICA-LOCAL-TEST.md
+/docs/*-regression.md
+/docs/*-findings.md
+/docs/*.png
+!docs/ElevenDE.png
+
+# Common editor and Python cache files
+__pycache__/
+*.py[cod]
+*.swp
+*~

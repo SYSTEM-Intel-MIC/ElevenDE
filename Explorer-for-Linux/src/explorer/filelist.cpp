@@ -229,6 +229,32 @@ static QPixmap paintedGlyph(bool isDir, int size)
     return pm;
 }
 
+static QIcon packagedIcon(const QString &name, const QString &category)
+{
+    const QString base = QStringLiteral("/usr/local/share/elevende-shell/icons/");
+    const QStringList sizes = { QStringLiteral("64x64"), QStringLiteral("48x48"), QStringLiteral("32x32"), QStringLiteral("24x24") };
+    for (const QString &size : sizes) {
+        const QString path = base + size + QLatin1Char('/') + category + QLatin1Char('/') + name + QStringLiteral(".png");
+        if (QFileInfo::exists(path))
+            return QIcon(path);
+    }
+    return QIcon();
+}
+
+static QIcon packagedFileIcon(const QFileInfo &fi)
+{
+    if (fi.isDir())
+        return packagedIcon(QStringLiteral("folder"), QStringLiteral("apps"));
+    const QString suffix = fi.suffix().toLower();
+    if (suffix == QStringLiteral("png") || suffix == QStringLiteral("jpg") || suffix == QStringLiteral("jpeg") || suffix == QStringLiteral("gif"))
+        return packagedIcon(QStringLiteral("image"), QStringLiteral("mimetypes"));
+    if (suffix == QStringLiteral("mp4") || suffix == QStringLiteral("mkv") || suffix == QStringLiteral("avi"))
+        return packagedIcon(QStringLiteral("video-x-generic"), QStringLiteral("mimetypes"));
+    if (suffix == QStringLiteral("txt") || suffix == QStringLiteral("md") || suffix == QStringLiteral("log") || suffix == QStringLiteral("conf"))
+        return packagedIcon(QStringLiteral("text-x-generic"), QStringLiteral("mimetypes"));
+    return packagedIcon(QStringLiteral("text-x-generic"), QStringLiteral("mimetypes"));
+}
+
 class FileList::Model : public QFileSystemModel
 {
 public:
@@ -243,6 +269,13 @@ public:
     QVariant data(const QModelIndex &index, int role) const override
     {
         if (role == Qt::DecorationRole) {
+            const QFileInfo fi(filePath(index));
+            const QIcon packaged = packagedFileIcon(fi);
+            if (!packaged.isNull())
+                return QVariant(packaged);
+            /* Only use the platform icon provider if a packaged WindowsIcons
+               asset is genuinely unavailable; never prefer a monochrome theme
+               icon over the curated Windows asset. */
             const QVariant themed = QFileSystemModel::data(index, role);
             if (!themed.isNull()) {
                 const QIcon ic = themed.value<QIcon>();

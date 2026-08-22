@@ -3,7 +3,7 @@ CFLAGS   ?= -O2 -Wall -Wextra
 GDK      := $(shell pkg-config --exists gdk-pixbuf-2.0 && echo 1)
 CFLAGS   += -Wno-format-truncation \
             $(shell pkg-config --cflags x11 xft fontconfig freetype2 libpng)
-LDLIBS    = $(shell pkg-config --libs x11 xft fontconfig freetype2 libpng)
+LDLIBS    = $(shell pkg-config --libs x11 xft fontconfig freetype2 libpng) -lm
 ifeq ($(GDK),1)
 CFLAGS   += -DHAVE_GDKPIXBUF=1 $(shell pkg-config --cflags gdk-pixbuf-2.0)
 LDLIBS   += $(shell pkg-config --libs gdk-pixbuf-2.0)
