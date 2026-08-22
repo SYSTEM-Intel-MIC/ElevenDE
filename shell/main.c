@@ -154,7 +154,14 @@ static int   sel_anim_act = 0;          /* selection animation still running */
 
 /* app search ------------------------------------------------------------ */
 #define NAPP 512
-typedef struct { char name[64]; char exec[96]; char icon[64]; } App;
+/* Keep the desktop-entry identity as well as a fallback Exec.  Long wrappers
+ * (Flatpak, Electron, locale launchers) are common in newly installed apps. */
+typedef struct {
+    char name[128];
+    char exec[512];
+    char icon[128];
+    char desktop_id[256];
+} App;
 static App apps[NAPP];
 static int napps = 0;
 static int res_idx[NAPP];
@@ -288,7 +295,7 @@ static void   draw_icon(Drawable dr, Pixmap pm, int size, int cx, int cy,
                         int boxw, int boxh);
 static void   load_apps(void);
 static void   filter_apps(void);
-static void   exec_strip(char *dst, const char *src);
+static void   exec_strip(char *dst, size_t dstsz, const char *src);
 static void   launch_app(int idx);
 static void   menu_filter_changed(void);
 static void   show_power(void);
@@ -3173,7 +3180,7 @@ static void autostart_scan(const char *dir) {
         }
         if (skip || !ex[0]) continue;
         char cmd[256];
-        exec_strip(cmd, ex);
+        exec_strip(cmd, sizeof cmd, ex);
         if (cmd[0]) launch_cmd(cmd);
     }
     closedir(dp);
@@ -3223,12 +3230,17 @@ static const char *ci_strstr(const char *hay, const char *needle) {
     return NULL;
 }
 
-static void exec_strip(char *dst, const char *src) {
-    int d = 0;
-    for (int s = 0; src[s] && d < 90; s++) {
+static void exec_strip(char *dst, size_t dstsz, const char *src) {
+    size_t d = 0;
+    if (!dstsz) return;
+    /* Field codes are interpreted by gtk-launch for the normal path.  This
+       fallback only removes them so an unrecognised desktop entry never turns
+       into a request to open the .desktop file in the file manager. */
+    for (size_t s = 0; src[s] && d + 1 < dstsz; s++) {
         if (src[s] == '%' && src[s + 1]) { s++; continue; }
         dst[d++] = src[s];
     }
+    while (d && (dst[d - 1] == ' ' || dst[d - 1] == '\t')) d--;
     dst[d] = 0;
 }
 
@@ -3245,12 +3257,19 @@ static void parse_desktop_dir(const char *dir) {
         snprintf(path, sizeof path, "%s/%s", dir, de->d_name);
         FILE *f = fopen(path, "r");
         if (!f) continue;
-        char nm[96] = "", zh[96] = "", ex[128] = "", ic[64] = "";
-        int nodisplay = 0, hidden = 0, app_type = 0;
+        char nm[128] = "", zh[128] = "", ex[1024] = "", ic[256] = "";
+        int nodisplay = 0, hidden = 0, app_type = 0, in_desktop_entry = 0;
         char ln[1024];
         while (fgets(ln, sizeof ln, f)) {
             char *p = ln;
             while (*p == ' ' || *p == '\t') p++;
+            if (*p == '[') {
+                in_desktop_entry = !strncmp(p, "[Desktop Entry]", 15);
+                continue;
+            }
+            /* Desktop Action groups may carry a different Exec.  Only the
+               main group represents the application shown in All apps. */
+            if (!in_desktop_entry) continue;
             if (!strncmp(p, "Type=", 5)) {
                 if (!strncmp(p + 5, "Application", 11)) app_type = 1;
             } else if (!strncmp(p, "Name=", 5) && !nm[0]) {
@@ -3280,25 +3299,80 @@ static void parse_desktop_dir(const char *dir) {
         if (!ex[0]) continue;
         App *a = &apps[napps];
         snprintf(a->name, sizeof a->name, "%s", nm);
-        exec_strip(a->exec, ex);
+        exec_strip(a->exec, sizeof a->exec, ex);
         nl = strlen(ic);
         while (nl && (ic[nl-1] == '\n' || ic[nl-1] == '\r')) ic[--nl] = 0;
         if (ic[0]) snprintf(a->icon, sizeof a->icon, "%s", ic);
+        snprintf(a->desktop_id, sizeof a->desktop_id, "%s", de->d_name);
+        size_t idlen = strlen(a->desktop_id);
+        if (idlen > 8 && !strcmp(a->desktop_id + idlen - 8, ".desktop"))
+            a->desktop_id[idlen - 8] = 0;
         napps++;
     }
     closedir(dp);
 }
 
+#define APP_DIRS_MAX 5
+typedef struct {
+    char path[512];
+    time_t mtime;
+    long mtime_nsec;
+    off_t size;
+    int exists;
+} AppDirWatch;
+static AppDirWatch app_dirs_watch[APP_DIRS_MAX];
+static int app_dirs_watch_n = 0;
+static int app_dirs_watch_ready = 0;
+
+static int app_dirs_collect(char dirs[APP_DIRS_MAX][512]) {
+    int n = 0;
+    const char *home = getenv("HOME");
+    if (home && *home) {
+        snprintf(dirs[n++], sizeof dirs[0], "%s/.local/share/applications", home);
+        snprintf(dirs[n++], sizeof dirs[0], "%s/.local/share/flatpak/exports/share/applications", home);
+    }
+    snprintf(dirs[n++], sizeof dirs[0], "/usr/local/share/applications");
+    snprintf(dirs[n++], sizeof dirs[0], "/usr/share/applications");
+    snprintf(dirs[n++], sizeof dirs[0], "/var/lib/flatpak/exports/share/applications");
+    return n;
+}
+
+static void app_dirs_watch_snapshot(void) {
+    char dirs[APP_DIRS_MAX][512];
+    app_dirs_watch_n = app_dirs_collect(dirs);
+    for (int i = 0; i < app_dirs_watch_n; i++) {
+        struct stat st;
+        snprintf(app_dirs_watch[i].path, sizeof app_dirs_watch[i].path, "%s", dirs[i]);
+        app_dirs_watch[i].exists = stat(dirs[i], &st) == 0 && S_ISDIR(st.st_mode);
+        app_dirs_watch[i].mtime = app_dirs_watch[i].exists ? st.st_mtime : 0;
+        app_dirs_watch[i].mtime_nsec = app_dirs_watch[i].exists ? st.st_mtim.tv_nsec : 0;
+        app_dirs_watch[i].size = app_dirs_watch[i].exists ? st.st_size : 0;
+    }
+    app_dirs_watch_ready = 1;
+}
+
+static int app_dirs_changed(void) {
+    char dirs[APP_DIRS_MAX][512];
+    int n = app_dirs_collect(dirs);
+    if (!app_dirs_watch_ready || n != app_dirs_watch_n) return 1;
+    for (int i = 0; i < n; i++) {
+        struct stat st;
+        int exists = stat(dirs[i], &st) == 0 && S_ISDIR(st.st_mode);
+        if (strcmp(dirs[i], app_dirs_watch[i].path) ||
+            exists != app_dirs_watch[i].exists ||
+            (exists && (st.st_mtime != app_dirs_watch[i].mtime ||
+                        st.st_mtim.tv_nsec != app_dirs_watch[i].mtime_nsec ||
+                        st.st_size != app_dirs_watch[i].size)))
+            return 1;
+    }
+    return 0;
+}
+
 static void load_apps(void) {
     napps = 0;
-    const char *home = getenv("HOME");
-    char dir[512];
-    if (home) {
-        snprintf(dir, sizeof dir, "%s/.local/share/applications", home);
-        parse_desktop_dir(dir);
-    }
-    parse_desktop_dir("/usr/local/share/applications");
-    parse_desktop_dir("/usr/share/applications");
+    char dirs[APP_DIRS_MAX][512];
+    int ndirs = app_dirs_collect(dirs);
+    for (int i = 0; i < ndirs; i++) parse_desktop_dir(dirs[i]);
     /* dedupe by exec (keep first occurrence) */
     for (int i = 0; i < napps; i++)
         for (int j = i + 1; j < napps; j++)
@@ -3308,6 +3382,19 @@ static void load_apps(void) {
                 napps--;
                 j--;
             }
+    app_dirs_watch_snapshot();
+}
+
+static void filter_apps(void);
+
+/* Return true only when a package manager, Flatpak or the user changes an
+ * application directory.  Menu opening also calls this, so users never need
+ * to log out or restart the shell after installing software. */
+static int apps_reload_if_changed(void) {
+    if (!app_dirs_changed()) return 0;
+    load_apps();
+    filter_apps();
+    return 1;
 }
 
 static void filter_apps(void) {
@@ -3328,9 +3415,18 @@ static void filter_apps(void) {
 
 static void launch_app(int idx) {
     if (idx < 0 || idx >= nres) return;
-    char cmd[512];
-    snprintf(cmd, sizeof cmd, "sh -c '%s'", apps[res_idx[idx]].exec);
-    launch_cmd(cmd);
+    const App *a = &apps[res_idx[idx]];
+    pid_t pid = fork();
+    if (pid == 0) {
+        /* gtk-launch/GIO resolves the real desktop entry, field codes and
+           wrappers. It launches the intended application, never the
+           .desktop file through explorer.exe. The Exec string is only a
+           direct fallback for environments without gtk-launch. */
+        if (a->desktop_id[0])
+            execlp("gtk-launch", "gtk-launch", a->desktop_id, (char *)NULL);
+        execl("/bin/sh", "sh", "-c", a->exec, (char *)NULL);
+        _exit(127);
+    }
     menu_hide();
     search_hide();
 }
@@ -4029,6 +4125,7 @@ static void menu_show(void) {
     pmx = pmy = -1;
     menu_filt[0] = 0;
     search_focus = 0;
+    apps_reload_if_changed();
     filter_apps();
     menu_x = (scr_w - MENU_W) / 2;
     menu_y = scr_h - BAR_H - MENU_H - 4;
@@ -5247,6 +5344,11 @@ int main(void) {
                         desk_size = dst.st_size;
                     }
                 }
+                /* Package managers, Flatpak and users add .desktop entries
+                   while ElevenDE is running. Refresh the All apps source in
+                   place; an open menu redraws without closing or flickering. */
+                if (apps_reload_if_changed() && menu_visible)
+                    menu_refresh();
             }
         }
         if (now != last_poll) {
