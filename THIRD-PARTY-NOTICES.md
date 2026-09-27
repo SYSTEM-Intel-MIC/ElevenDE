@@ -10,14 +10,14 @@ ElevenDE 的根目录 [`LICENSE`](LICENSE) 是 GNU General Public License versio
 
 | 组件或范围 | 原始来源与原始许可 | ElevenDE 的内容与许可 | 随仓库保留的文件 |
 |---|---|---|---|
-| `Explorer-for-Linux/` | [macOS-Terminal/Explorer-for-Linux][explorer]，MIT。[1] | Lindows 资源管理器的 UI、布局、图标、命令栏、路径栏、This PC 和交互改动属于 ElevenDE 的新增修改，GPL-3.0-or-later；原始 MIT 代码仍保留 MIT 许可。 | [`LICENSES/Explorer-for-Linux-MIT.txt`](LICENSES/Explorer-for-Linux-MIT.txt) |
+| `Explorer-for-Linux/` | [macOS-Terminal/Explorer-for-Linux][explorer]，MIT。[1] | 资源管理器的 UI、布局、图标、命令栏、路径栏、This PC 和交互改动属于 ElevenDE 的新增修改，GPL-3.0-or-later；原始 MIT 代码仍保留 MIT 许可。 | [`LICENSES/Explorer-for-Linux-MIT.txt`](LICENSES/Explorer-for-Linux-MIT.txt) |
 | `SAS-for-Linux/` | [macOS-Terminal/SAS-for-Linux][sas]，MIT。[2] | Shell 会话启动、快捷键、部署、调用链与 ElevenDE 自主整合代码为 GPL-3.0-or-later；SAS 原始代码仍为 MIT。 | [`LICENSES/SAS-for-Linux-MIT.txt`](LICENSES/SAS-for-Linux-MIT.txt) |
 | `runbox-linux/` | SYSTEM-Intel-MIC 维护的 RunBox 组件。 | 由权利人随 ElevenDE 发布；本仓库内的 RunBox 源码及其 ElevenDE 集成按 GPL-3.0-or-later 提供。 | 根目录 [`LICENSE`](LICENSE) |
 | `shell/`、`apps/`、`wm/`、`session/`、`scripts/`、`tools/` | ElevenDE 自主组件。 | GPL-3.0-or-later。 | 根目录 [`LICENSE`](LICENSE) |
 
-### Lindows 资源管理器的具体说明
+### 资源管理器的具体说明
 
-Lindows 资源管理器不是把 Explorer-for-Linux 更名后声明为完全自研。它以该项目的 MIT 代码为基础，并在以下文件中叠加 ElevenDE/Lindows 的增量实现：
+资源管理器不是把 Explorer-for-Linux 更名后声明为完全自研。它以该项目的 MIT 代码为基础，并在以下文件中叠加 ElevenDE/Lindows 的增量实现：
 
 | 文件 | ElevenDE/Lindows 增量方向 |
 |---|---|

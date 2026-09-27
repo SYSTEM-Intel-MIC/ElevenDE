@@ -256,6 +256,46 @@ static QIcon packagedFileIcon(const QFileInfo &fi)
     return packagedIcon(QStringLiteral("text-x-generic"), QStringLiteral("mimetypes"));
 }
 
+/* --- drop INTO Explorer (3.5.1) ------------------------------------------
+ * Recursive copy used by drops: QFile::copy only handles plain files, and a
+ * dropped folder must arrive with its whole tree.  Symlinks are skipped on
+ * purpose -- following them can loop forever. */
+static bool copyPathRec(const QString &src, const QString &dst)
+{
+    const QFileInfo si(src);
+    if (si.isSymLink())
+        return true;                       /* links are skipped, not an error */
+    if (si.isDir()) {
+        if (!QDir().mkpath(dst))
+            return false;
+        const QFileInfoList entries =
+            QDir(src).entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot |
+                                    QDir::Hidden | QDir::System);
+        for (const QFileInfo &e : entries)
+            if (!copyPathRec(e.filePath(),
+                             dst + QLatin1Char('/') + e.fileName()))
+                return false;
+        return true;
+    }
+    return QFile::copy(src, dst);
+}
+
+/* Windows-style clash naming: "report.pdf" -> "report (2).pdf". */
+static QString uniquePathForCopy(const QString &dir, const QString &name)
+{
+    QString base = name, ext;
+    const int dot = name.lastIndexOf(QLatin1Char('.'));
+    if (dot > 0) {                         /* keep extension, ignore dotfiles */
+        base = name.left(dot);
+        ext = name.mid(dot);
+    }
+    QString cand = dir + QLatin1Char('/') + name;
+    for (int i = 2; QFileInfo::exists(cand); ++i)
+        cand = dir + QLatin1Char('/') + base +
+               QString::fromLatin1(" (%1)").arg(i) + ext;
+    return cand;
+}
+
 class FileList::Model : public QFileSystemModel
 {
 public:
@@ -300,9 +340,66 @@ public:
     Qt::ItemFlags flags(const QModelIndex &index) const override
     {
         Qt::ItemFlags f = QFileSystemModel::flags(index);
-        if (index.isValid())
+        if (index.isValid()) {
             f |= Qt::ItemIsDragEnabled;
+            /* Folder items -- including the view's root directory, which is
+             * what QAbstractItemView asks about for background drops --
+             * receive drops.  Plain files stay drop-disabled so the view
+             * falls back to their containing folder (Above/Below item).
+             * The model itself remains read-only: no rename/delete path is
+             * opened by this. */
+            if (isDir(index))
+                f |= Qt::ItemIsDropEnabled;
+        }
         return f;
+    }
+
+    /* --- drop INTO Explorer (3.5.1): drag files between two Explorer
+     * windows, or from the desktop shell / any XDND source into Explorer.
+     * QFileSystemModel::dropMimeData refuses to work while the model is
+     * read-only, so drops are handled here instead of toggling read-only.
+     * Semantics are strictly COPY: the source is never moved or removed,
+     * clashes get a " (2)" suffix like Windows, and dropping files onto the
+     * folder they already live in is accepted as a no-op (prevents phantom
+     * duplicates from an accidental same-window drag).  The copy runs
+     * synchronously, exactly like Qt's own file-manager drops. */
+    bool dropMimeData(const QMimeData *data, Qt::DropAction action,
+                      int row, int column, const QModelIndex &parent) override
+    {
+        Q_UNUSED(action)
+        Q_UNUSED(row)
+        Q_UNUSED(column)
+        if (!data || !data->hasUrls() || !parent.isValid())
+            return false;
+        const QFileInfo tfi(filePath(parent));
+        if (!tfi.isDir())
+            return false;
+        const QString targetDir = tfi.absoluteFilePath();
+        bool sawLocal = false;
+        const QList<QUrl> urls = data->urls();
+        for (const QUrl &u : urls) {
+            if (!u.isLocalFile())
+                continue;
+            const QString src = u.toLocalFile();
+            if (src.isEmpty())
+                continue;
+            const QFileInfo sfi(src);
+            if (!sfi.exists() || sfi.isSymLink())
+                continue;
+            sawLocal = true;
+            const QString srcDir = sfi.absolutePath();
+            if (srcDir == targetDir)
+                continue;                  /* already lives here: no-op */
+            if (sfi.isDir() && (targetDir + QLatin1Char('/'))
+                                   .startsWith(srcDir + QLatin1Char('/')))
+                continue;                  /* never copy a folder into itself */
+            const QString dst = uniquePathForCopy(targetDir, sfi.fileName());
+            if (sfi.isDir())
+                copyPathRec(src, dst);
+            else
+                QFile::copy(src, dst);
+        }
+        return sawLocal;
     }
 
     QMimeData *mimeData(const QModelIndexList &indexes) const override
@@ -322,6 +419,14 @@ public:
     }
 
     Qt::DropActions supportedDragActions() const override
+    {
+        return Qt::CopyAction | Qt::MoveAction;
+    }
+
+    /* Dropping is negotiated as a copy no matter what the source proposes
+     * (the view default is CopyAction anyway); Move is still advertised so
+     * drop-capable targets elsewhere do not reject our drags. */
+    Qt::DropActions supportedDropActions() const override
     {
         return Qt::CopyAction | Qt::MoveAction;
     }
@@ -460,15 +565,19 @@ FileList::FileList(QWidget *parent)
     m_proxy->setSourceModel(m_model);
     m_proxy->sort(SortName, Qt::AscendingOrder);
 
-    /* Drag OUT of Explorer (3.5.1). DragOnly = views are pure drag sources:
-     * XDND carries the selection to the desktop shell or any other drop-aware
-     * program (xterm itself predates XDND and cannot receive drops). Drops
-     * INTO Explorer stay disabled while the model is read-only. */
+    /* Drag & drop both ways (3.5.1). DragDrop = views are drag sources AND
+     * drop targets: XDND carries the selection out to the desktop shell or
+     * any other drop-aware program, and files dragged from another Explorer
+     * window (or any XDND source) land in the folder under the cursor as
+     * copies -- see Model::dropMimeData. (xterm itself predates XDND and
+     * cannot receive drops.) */
     for (QAbstractItemView *v : { (QAbstractItemView *)m_iconView,
                                   (QAbstractItemView *)m_listView,
                                   (QAbstractItemView *)m_treeView }) {
         v->setDragEnabled(true);
-        v->setDragDropMode(QAbstractItemView::DragOnly);
+        v->setDragDropMode(QAbstractItemView::DragDrop);
+        v->setAcceptDrops(true);
+        v->setDropIndicatorShown(true);
         v->setDefaultDropAction(Qt::CopyAction);
     }
 

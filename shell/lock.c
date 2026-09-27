@@ -136,7 +136,11 @@ static void load_wallpaper(void) {
     struct stat st;
     if (!path[0] || stat(path, &st) != 0)
         snprintf(path, sizeof path,
-                 "/usr/local/share/elevende-shell/wallpapers/wallpaper-lindows-light.png");
+                 "/usr/local/share/elevende-shell/wallpaper.png");
+    if (stat(path, &st) != 0)
+        snprintf(path, sizeof path,
+                 "/usr/local/share/elevende-shell/wallpapers/"
+                 "wallpaper-bloom-blue.png");
     if (stat(path, &st) != 0) return;
     GError *err = NULL;
     GdkPixbuf *pb = gdk_pixbuf_new_from_file(path, &err);

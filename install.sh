@@ -248,6 +248,13 @@ elif command -v python3 >/dev/null 2>&1; then
     ( cd "$SRC_DIR/assets" && python3 gen_wallpapers.py ) || warn "wallpaper generation failed"
     install -m644 "$SRC_DIR"/assets/wallpapers/*.png "$SHARE/wallpapers/" 2>/dev/null || true
 fi
+# System-wide default wallpaper (parity with build-deb.sh): the shell and the
+# lock screen fall back to $SHARE/wallpaper.png when no user wallpaper exists.
+if [ -f "$SRC_DIR/assets/wallpapers/wallpaper-bloom-blue.png" ]; then
+    install -m644 "$SRC_DIR/assets/wallpapers/wallpaper-bloom-blue.png" "$SHARE/wallpaper.png"
+fi
+# Retire the old default from previous source installs.
+rm -f "$SHARE/wallpapers/wallpaper-lindows-light.png"
 
 # ---- Win11 icon set ---------------------------------------------------------
 log "installing the Win11 icon set"

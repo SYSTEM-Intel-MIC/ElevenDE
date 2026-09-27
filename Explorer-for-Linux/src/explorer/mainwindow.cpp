@@ -648,7 +648,7 @@ void MainWindow::onSidebarActivated(QListWidgetItem *item)
 
 void MainWindow::setViewTitle(const QString &title)
 {
-    const QString fullTitle = title + QStringLiteral(" — Lindows 资源管理器");
+    const QString fullTitle = title + QStringLiteral(" — 资源管理器");
     setWindowTitle(fullTitle);
     if (m_titleLabel)
         m_titleLabel->setText(fullTitle);

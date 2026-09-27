@@ -55,6 +55,9 @@
 #define ICON_GY   24
 #define ICON_CSX  (ICON_W + 14)
 #define ICON_CSY  (ICON_H + 10)
+/* Pointer movement (manhattan, px) before a press becomes a drag -- the same
+ * idea as Qt's startDragDistance behind the Explorer icon view. */
+#define DRAG_THRESHOLD 6
 #define MAX_TASKS 96
 #define MAX_ICONS 96
 #define MAX_HOT   96
@@ -152,6 +155,14 @@ static int sel_icon = -1;               /* last single-selected desktop icon */
 static int hover_icon = -1;             /* desktop icon under the pointer */
 static float sel_anim = 1.0f;           /* 0..1 selection-box scale progress */
 static int   sel_anim_act = 0;          /* selection animation still running */
+static int dragging_icon = 0;           /* past threshold: icon floats */
+static int drag_gx = 0, drag_gy = 0;    /* floating position (follows cursor) */
+static int drag_tx = 0, drag_ty = 0;    /* landing cell top-left */
+static int drag_occupant = -1;          /* icon already living in that cell */
+static int settle_icon = -1;            /* icon gliding into place */
+static int settle_fx = 0, settle_fy = 0;/* glide start position */
+static float settle_t = 1.0f;           /* 0..1 glide progress */
+static int   settle_act = 0;            /* glide still running */
 
 /* app search ------------------------------------------------------------ */
 #define NAPP 512
@@ -2851,6 +2862,19 @@ static void paint_desktop(void) {
         }
     }
     for (int i = 0; i < nic; i++) {
+        int dragging = (i == press_icon && dragging_icon);
+        /* While dragging: the selection box marks the LANDING cell, the icon
+         * floats with the cursor, and its origin slot keeps a faint wash.
+         * After release the icon glides into place (settle animation). */
+        int cellx = dragging ? drag_tx : ic[i].x;
+        int celly = dragging ? drag_ty : ic[i].y;
+        int ix = dragging ? drag_gx : ic[i].x;
+        int iy = dragging ? drag_gy : ic[i].y;
+        if (settle_act && i == settle_icon) {
+            float e = settle_t * (2.0f - settle_t);       /* ease-out glide */
+            ix = settle_fx + (int)((ic[i].x - settle_fx) * e);
+            iy = settle_fy + (int)((ic[i].y - settle_fy) * e);
+        }
         if (i == sel_icon) {                 /* Win11 whole-cell selection box */
             /* eased pop-in, same feel as the Start-menu hover chip */
             /* A restrained opacity fade reads more like Windows 11 than a
@@ -2858,7 +2882,7 @@ static void paint_desktop(void) {
              * desktop icons on lower-end X11 systems. */
             float ease = sel_anim * (2.0f - sel_anim);
             int fw = ICON_W + 8, fh = ICON_H + 8;
-            int fx = ic[i].x - 4, fy = ic[i].y - 4;
+            int fx = cellx - 4, fy = celly - 4;
             desk_tint(fx, fy, fw, fh, 0xFFFFFF, 36 + (int)(26 * ease), 10);
             XSetForeground(dpy, bgc, cc_sel.pixel);
             XSetLineAttributes(dpy, bgc, 2, LineSolid, CapRound, JoinRound);
@@ -2873,6 +2897,9 @@ static void paint_desktop(void) {
             XDrawLine(dpy, win_desk, bgc, fx + fw - 1, fy + r + 1, fx + fw - 1, fy + fh - r - 1);
             XSetLineAttributes(dpy, bgc, 1, LineSolid, CapButt, JoinMiter);
         }
+        if (dragging)
+            desk_tint(ic[i].x - 4, ic[i].y - 4, ICON_W + 8, ICON_H + 8,
+                      0xFFFFFF, 30, 10);     /* placeholder in the origin slot */
         /* Win11 hover wash (under the selection ring when both apply) */
         if (i == hover_icon && i != sel_icon)
             desk_tint(ic[i].x - 4, ic[i].y - 4, ICON_W + 8, ICON_H + 8,
@@ -2898,22 +2925,22 @@ static void paint_desktop(void) {
         const char *ipath = theme_find(nm, 64);
         IconRGBA *ib = ipath ? icon_rgba_for_path(ipath, 64) : NULL;
         if (ib)
-            desk_draw_icon_alpha(ib, ic[i].x + 16, ic[i].y + 2);
+            desk_draw_icon_alpha(ib, ix + 16, iy + 2);
         else
-            draw_icon_kind(win_desk, kind, ic[i].x + 48, ic[i].y + 34, 56,
+            draw_icon_kind(win_desk, kind, ix + 48, iy + 34, 56,
                            cc_light.pixel);
         /* label: truncated with an ellipsis when too long, then drawn with
          * a soft dark halo so it stays readable on any wallpaper */
         char label_fit[96];
         fit_label(label_fit, sizeof label_fit, ic[i].label, f_small, ICON_W - 6);
-        const int ly = ic[i].y + 74;
-        draw_str_c(win_desk, xd_desk, f_small, &cc_lo, ic[i].x + 1, ly + 1,
+        const int ly = iy + 74;
+        draw_str_c(win_desk, xd_desk, f_small, &cc_lo, ix + 1, ly + 1,
                    ICON_W, 18, label_fit);
-        draw_str_c(win_desk, xd_desk, f_small, &cc_lo, ic[i].x,     ly + 1,
+        draw_str_c(win_desk, xd_desk, f_small, &cc_lo, ix,     ly + 1,
                    ICON_W, 18, label_fit);
-        draw_str_c(win_desk, xd_desk, f_small, &cc_lo, ic[i].x + 1, ly,
+        draw_str_c(win_desk, xd_desk, f_small, &cc_lo, ix + 1, ly,
                    ICON_W, 18, label_fit);
-        draw_str_c(win_desk, xd_desk, f_small, &cc_text, ic[i].x,   ly,
+        draw_str_c(win_desk, xd_desk, f_small, &cc_text, ix,   ly,
                    ICON_W, 18, label_fit);
     }
     XFlush(dpy);
@@ -3444,6 +3471,11 @@ static void menu_filter_changed(void) {
     filter_apps();
     sel_row = 0;
     apps_scroll = 0;
+    /* pinned tiles are hidden while filtering: drop any stale hover state so
+     * no phantom grow-in animation shows up when the grid returns */
+    menu_tile_idx = -1;
+    menu_tile_prev = -1;
+    tile_anim_act = 0;
     list_vis = list_rows_vis();
     draw_menu();
 }
@@ -4671,7 +4703,15 @@ static void handle_bar_press(int but, int x, int y) {
 
 static void handle_menu_press(int but, int x, int y) {
     cal_hide();
+    /* While a search filter is active the result rows are painted straight
+     * over the pinned grid (LIST_TOP_FILTER..LIST_BOTTOM overlaps the PIN_TOP
+     * hot cells), but the pinned tiles themselves are NOT drawn.  Their hot
+     * regions must therefore be skipped while filtering, otherwise a click on
+     * a result row is swallowed by the invisible pinned tile underneath and
+     * launches the wrong app ("click-through"). */
+    int filtering = menu_filt[0] != 0;
     for (int i = 0; i < nmenu_hot; i++) {
+        if (filtering && i >= 1 && i <= npin_tiles) continue;
         if (in_rect(menu_hot[i], x, y)) {
             if (i == 0) {                          /* search pill */
                 if (but == Button3) { menu_hide(); }
@@ -4936,16 +4976,30 @@ static void handle_root_press(int but, int x, int y) {
     if (but == Button3) {                          /* desktop context menu */
         press_active = 0;
         press_icon = -1;
+        dragging_icon = 0;
         dm_show(x, y, icon);
         return;
     }
-    press_active = icon >= 0;
-    press_icon = icon;
-    sel_icon = icon;
-    if (icon >= 0) { sel_anim = 0.0f; sel_anim_act = 1; }   /* pop-in like Start menu */
+    /* Only Button1 selects/drags the desktop (middle click does nothing,
+     * matching Windows). */
+    press_active = (but == Button1 && icon >= 0);
+    press_icon = press_active ? icon : -1;
+    dragging_icon = 0;
+    settle_act = 0;
+    settle_icon = -1;
     press_x0 = x;
     press_y0 = y;
-    if (icon >= 0) { ic_orig_x = ic[icon].x; ic_orig_y = ic[icon].y; }
+    if (press_active) {
+        sel_icon = icon;
+        sel_anim = 0.0f; sel_anim_act = 1;      /* pop-in like Start menu */
+        ic_orig_x = ic[icon].x;
+        ic_orig_y = ic[icon].y;
+        drag_gx = drag_tx = ic[icon].x;
+        drag_gy = drag_ty = ic[icon].y;
+        drag_occupant = -1;
+    } else if (icon < 0) {
+        sel_icon = -1;                          /* click empty space deselects */
+    }
 }
 
 static void handle_desk_motion(int x, int y) {
@@ -4958,33 +5012,87 @@ static void handle_desk_motion(int x, int y) {
         if (h != hover_icon) { hover_icon = h; desk_dirty = 1; }
         return;
     }
-    int nx = ic_orig_x + (x - press_x0);
-    int ny = ic_orig_y + (y - press_y0);
-    /* snap to the icon lattice like Windows "auto arrange to grid" */
-    ic[press_icon].x = ICON_GX + ((nx - ICON_GX + ICON_CSX / 2) / ICON_CSX) * ICON_CSX;
-    ic[press_icon].y = ICON_GY + ((ny - ICON_GY + ICON_CSY / 2) / ICON_CSY) * ICON_CSY;
+    if (!dragging_icon) {
+        /* Explorer/Qt drag threshold: below it a press is still a click, so
+         * pointer jitter can neither teleport the icon nor break double-click */
+        if (abs(x - press_x0) + abs(y - press_y0) < DRAG_THRESHOLD)
+            return;
+        dragging_icon = 1;
+        hover_icon = -1;                    /* hover wash would fight the drag */
+        drag_gx = ic_orig_x;
+        drag_gy = ic_orig_y;
+    }
+    /* The icon floats with the cursor (grab offset preserved) while its
+     * committed cell keeps showing the placeholder until release. */
+    drag_gx = ic_orig_x + (x - press_x0);
+    drag_gy = ic_orig_y + (y - press_y0);
+    /* Landing cell = nearest lattice slot, clamped to the desktop area so an
+     * icon can never end up hidden under the taskbar. */
+    int tx = ICON_GX + ((drag_gx - ICON_GX + ICON_CSX / 2) / ICON_CSX) * ICON_CSX;
+    int ty = ICON_GY + ((drag_gy - ICON_GY + ICON_CSY / 2) / ICON_CSY) * ICON_CSY;
+    int maxtx = ICON_GX + ((scr_w - 8 - ICON_W - ICON_GX) / ICON_CSX) * ICON_CSX;
+    int maxty = ICON_GY +
+                ((scr_h - BAR_H - 8 - ICON_H - ICON_GY) / ICON_CSY) * ICON_CSY;
+    if (maxtx < ICON_GX) maxtx = ICON_GX;
+    if (maxty < ICON_GY) maxty = ICON_GY;
+    if (tx < ICON_GX) tx = ICON_GX;
+    if (ty < ICON_GY) ty = ICON_GY;
+    if (tx > maxtx) tx = maxtx;
+    if (ty > maxty) ty = maxty;
+    if (tx != drag_tx || ty != drag_ty) {
+        drag_tx = tx;
+        drag_ty = ty;
+        drag_occupant = -1;                 /* who already lives in that cell */
+        for (int i = 0; i < nic; i++)
+            if (i != press_icon && ic[i].x == tx && ic[i].y == ty) {
+                drag_occupant = i;
+                break;
+            }
+    }
     desk_dirty = 1;
 }
 
 static void handle_desk_release(int x, int y) {
-    if (!press_active) { press_active = 0; return; }
+    (void)x; (void)y;   /* landing state comes from the last motion event */
+    if (!press_active) { press_active = 0; dragging_icon = 0; return; }
     press_active = 0;
-    if (press_icon < 0) return;
-    int moved = abs(x - press_x0) + abs(y - press_y0);
-    if (moved >= 8) {
-        icons_pos_save();                /* remember the new grid position */
-        press_icon = -1;
+    if (press_icon < 0) { dragging_icon = 0; return; }
+    int icon = press_icon;
+    press_icon = -1;
+    if (dragging_icon) {
+        dragging_icon = 0;
+        /* Land: swap with whatever already sits in the target cell so two
+         * icons can never overlap (an overlapped icon used to be
+         * unreachable because hit-testing picked the first one). */
+        if (drag_occupant >= 0 && drag_occupant < nic) {
+            ic[drag_occupant].x = ic_orig_x;
+            ic[drag_occupant].y = ic_orig_y;
+        }
+        drag_occupant = -1;
+        int changed = (ic[icon].x != drag_tx || ic[icon].y != drag_ty);
+        ic[icon].x = drag_tx;
+        ic[icon].y = drag_ty;
+        if (changed)
+            icons_pos_save();               /* remember the new grid position */
+        /* Glide from where the cursor let go into the landing cell. */
+        settle_icon = icon;
+        settle_fx = drag_gx;
+        settle_fy = drag_gy;
+        settle_t = 0.0f;
+        settle_act = 1;
+        desk_dirty = 1;
         return;
     }
+    /* Plain click: jitter under the threshold still counts as a click, so an
+     * unsteady pointer can no longer break double-clicks (Win11 feel). */
     double t = now_sec();
-    if (press_icon == last_click_icon && t - last_click < 0.5) {
-        open_path(ic[press_icon].path);
+    if (icon == last_click_icon && t - last_click < 0.5) {
+        open_path(ic[icon].path);
         last_click_icon = -1;
     } else {
-        last_click_icon = press_icon;
+        last_click_icon = icon;
         last_click = t;
     }
-    press_icon = -1;
 }
 
 /* ----------------------------------------------------------------- main */
@@ -5371,6 +5479,13 @@ int main(void) {
                 break;
             case ButtonRelease:
                 if (ev.xbutton.window == win_vol) { vol_drag = 0; break; }
+                /* An icon press holds the implicit pointer grab, but be
+                 * defensive: any release ends a desktop press/drag even if
+                 * the event shows up for another window. */
+                if (press_active || dragging_icon) {
+                    handle_desk_release(ev.xbutton.x, ev.xbutton.y);
+                    break;
+                }
                 if (ev.xbutton.window == win_bar) break;   /* consume, no leak */
                 if (ev.xbutton.window == win_desk)
                     handle_desk_release(ev.xbutton.x, ev.xbutton.y);
@@ -5423,9 +5538,12 @@ int main(void) {
                     if (ev.xmotion.y >= lr.y && ev.xmotion.y < lr.y + lr.h)
                         r = (ev.xmotion.y - lr.y) / ROW_H;
                     int tidx = -1;
-                    for (int i = 1; i <= npin_tiles; i++)
-                        if (in_rect(menu_hot[i], ev.xmotion.x, ev.xmotion.y))
-                            { tidx = i; break; }
+                    /* pinned tiles are hidden while filtering: never let them
+                     * capture hover (the result rows live in the same space) */
+                    if (!menu_filt[0])
+                        for (int i = 1; i <= npin_tiles; i++)
+                            if (in_rect(menu_hot[i], ev.xmotion.x, ev.xmotion.y))
+                                { tidx = i; break; }
                     int ph = in_rect(menu_hot[1 + npin_tiles],
                                      ev.xmotion.x, ev.xmotion.y);
                     int changed = 0;
@@ -5606,6 +5724,12 @@ int main(void) {
             desk_dirty = 1;
         }
 
+        if (settle_act) {                    /* icon gliding into its cell */
+            settle_t += 0.2f;
+            if (settle_t >= 1.0f) { settle_t = 1.0f; settle_act = 0; }
+            desk_dirty = 1;
+        }
+
         time_t now = time(NULL);
         if (now >= last_state_poll + 2) {
             last_state_poll = now;
@@ -5709,7 +5833,8 @@ int main(void) {
         if (dirty) dirty = 0;
         XFlush(dpy);
 
-        struct timeval tv = { 0, (press_active || tile_anim_act || sel_anim_act) ? 16000 : 150000 };
+        struct timeval tv = { 0, (press_active || tile_anim_act || sel_anim_act ||
+                                  settle_act) ? 16000 : 150000 };
         fd_set fds;
         FD_ZERO(&fds);
         FD_SET(ConnectionNumber(dpy), &fds);

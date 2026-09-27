@@ -284,9 +284,9 @@ fi
 mkdir -p "$PKG_ROOT$SHARE/wallpapers"
 if ls assets/wallpapers/*.png >/dev/null 2>&1; then
     install -m644 assets/wallpapers/*.png "$PKG_ROOT$SHARE/wallpapers/"
-    # The third supplied wallpaper is the Lindows light default.
-    if [ -f assets/wallpapers/wallpaper-lindows-light.png ]; then
-        install -m644 assets/wallpapers/wallpaper-lindows-light.png "$PKG_ROOT$SHARE/wallpaper.png"
+    # System-wide default wallpaper (shell + lock screen fallback).
+    if [ -f assets/wallpapers/wallpaper-bloom-blue.png ]; then
+        install -m644 assets/wallpapers/wallpaper-bloom-blue.png "$PKG_ROOT$SHARE/wallpaper.png"
     fi
 fi
 

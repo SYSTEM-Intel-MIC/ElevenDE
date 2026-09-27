@@ -4,7 +4,7 @@
 
 | 文件 | 对应上游 | 用途 |
 |---|---|---|
-| `Explorer-for-Linux-MIT.txt` | [macOS-Terminal/Explorer-for-Linux][explorer] | 保留 Lindows 资源管理器上游基础代码的 MIT 许可。 |
+| `Explorer-for-Linux-MIT.txt` | [macOS-Terminal/Explorer-for-Linux][explorer] | 保留 资源管理器上游基础代码的 MIT 许可。 |
 | `SAS-for-Linux-MIT.txt` | [macOS-Terminal/SAS-for-Linux][sas] | 保留 SAS 上游基础代码的 MIT 许可。 |
 | `Fluent-System-Icons-MIT.txt` | [Microsoft Fluent System Icons][fluent] | 保留导入 Fluent 图标资源的 MIT 许可。 |
 
