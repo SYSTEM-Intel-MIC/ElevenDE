@@ -21,6 +21,7 @@
 #include <QLinearGradient>
 #include <QListView>
 #include <QMenu>
+#include <QMimeData>
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
@@ -289,6 +290,41 @@ public:
         }
         return QFileSystemModel::data(index, role);
     }
+
+    /* --- drag source (3.5.1): files can be dragged OUT of Explorer ---------
+     * Qt turns a view drag into an XDND drag on X11, so anything drop-capable
+     * (the ElevenDE desktop shell, other file managers, browsers, editors)
+     * receives the selection as text/uri-list. The mime payload is built here
+     * from the file paths so it never depends on what the base class
+     * serializes; setReadOnly(true) only disables drops, not drags. */
+    Qt::ItemFlags flags(const QModelIndex &index) const override
+    {
+        Qt::ItemFlags f = QFileSystemModel::flags(index);
+        if (index.isValid())
+            f |= Qt::ItemIsDragEnabled;
+        return f;
+    }
+
+    QMimeData *mimeData(const QModelIndexList &indexes) const override
+    {
+        auto *md = new QMimeData;
+        QList<QUrl> urls;
+        for (const QModelIndex &idx : indexes) {
+            if (!idx.isValid())
+                continue;
+            const QString p = filePath(idx);
+            if (!p.isEmpty())
+                urls.append(QUrl::fromLocalFile(p));
+        }
+        if (!urls.isEmpty())
+            md->setUrls(urls);
+        return md;
+    }
+
+    Qt::DropActions supportedDragActions() const override
+    {
+        return Qt::CopyAction | Qt::MoveAction;
+    }
 };
 
 /* Filtering + sorting proxy used by all three views (the approach PCManFM /
@@ -409,7 +445,7 @@ FileList::FileList(QWidget *parent)
     m_treeView->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_treeView->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_treeView->setAlternatingRowColors(false);
-    m_treeView->setAnimated(false);
+    m_treeView->setAnimated(true);   /* expand/collapse glide (3.5.1) */
     m_treeView->setSortingEnabled(true);
     QHeaderView *h = m_treeView->header();
     h->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
@@ -423,6 +459,18 @@ FileList::FileList(QWidget *parent)
 
     m_proxy->setSourceModel(m_model);
     m_proxy->sort(SortName, Qt::AscendingOrder);
+
+    /* Drag OUT of Explorer (3.5.1). DragOnly = views are pure drag sources:
+     * XDND carries the selection to the desktop shell or any other drop-aware
+     * program (xterm itself predates XDND and cannot receive drops). Drops
+     * INTO Explorer stay disabled while the model is read-only. */
+    for (QAbstractItemView *v : { (QAbstractItemView *)m_iconView,
+                                  (QAbstractItemView *)m_listView,
+                                  (QAbstractItemView *)m_treeView }) {
+        v->setDragEnabled(true);
+        v->setDragDropMode(QAbstractItemView::DragOnly);
+        v->setDefaultDropAction(Qt::CopyAction);
+    }
 
     auto wireSelection = [this](QAbstractItemView *v) {
         connect(v->selectionModel(), &QItemSelectionModel::selectionChanged,

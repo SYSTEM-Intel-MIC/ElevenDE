@@ -28,6 +28,7 @@
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #endif
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/select.h>
 #include <sys/stat.h>
 #include <signal.h>
@@ -2029,7 +2030,7 @@ static const char *app_icon_name(const char *cls) {
         { "elevende-settings", "preferences-system" },
         { "elevende-taskmgr", "utilities-system-monitor" },
         { "elevende-notepad", "accessories-text-editor" },
-        { "elevende-photos",  "image-x-generic" },
+        { "eog",              "image-x-generic" },
         { "org.gnome.systemmonitor", "utilities-system-monitor" },
         { "gnome-system-monitor", "utilities-system-monitor" },
         { "xfce4-taskmanager", "utilities-system-monitor" },
@@ -2940,6 +2941,11 @@ static Window mk_desktop_window(int w, int h) {
     hint.res_class = (char *)"ElevenDE";
     XSetClassHint(dpy, d, &hint);
     XSetWMProtocols(dpy, d, NULL, 0);
+    /* XDND v5 target: files dragged out of Explorer (or any XDND source)
+     * land on the desktop and are copied into ~/Desktop (see xdnd_*). */
+    long xdnd_aware = 5;
+    XChangeProperty(dpy, d, atom("XdndAware"), XA_ATOM, 32, PropModeReplace,
+                    (unsigned char *)&xdnd_aware, 1);
     return d;
 }
 
@@ -3649,7 +3655,24 @@ static void menu_hide(void) {
     power_hide();
     pinmenu_hide();
     ctx_hide();
-    if (menu_visible && win_menu) XUnmapWindow(dpy, win_menu);
+    if (menu_visible && win_menu) {
+        /* Win11-style close: mirror of menu_show()'s slide-up -- glide back
+         * down towards the taskbar (ease-in) before unmapping, instead of
+         * vanishing in one frame. The 5-frame loop is a short block; state
+         * below is only cleared afterwards, so nothing re-enters. */
+        int y0 = menu_y + 70;
+        for (int f = 1; f <= 5; f++) {
+            double t = f / 5.0;
+            double e = t * t;             /* ease-in: slow start, quick end */
+            XMoveResizeWindow(dpy, win_menu, menu_x,
+                              menu_y + (int)((y0 - menu_y) * e),
+                              MENU_W, MENU_H);
+            XFlush(dpy);
+            usleep(14000);
+        }
+        XUnmapWindow(dpy, win_menu);
+        XMoveResizeWindow(dpy, win_menu, menu_x, menu_y, MENU_W, MENU_H);
+    }
     menu_visible = 0;
     search_focus = 0;
     menu_tile_idx = -1;
@@ -3936,7 +3959,265 @@ static void icons_reload(void) {
     desk_dirty = 1;
 }
 
+/* --------------------------------------------------------------- XDND target
+ * Accept files dragged out of Explorer (Qt enables XDND on its views) or any
+ * other XDND source -- file managers, browsers, editors -- and COPY them into
+ * ~/Desktop, where icons_reload()/gen_icons() already render them as desktop
+ * icons. Always a copy: a drop can never move or delete the original.
+ * Protocol: XDND v5 (xdnd.org), as implemented by Qt and GTK. */
+static Window xdnd_src = 0;            /* drag source window, 0 = idle      */
+static Atom   xdnd_type = 0;           /* accepted source type (uri-list)  */
+static Time   xdnd_time = CurrentTime; /* last timestamp seen in the drag  */
+static int    xdnd_ver = 0;            /* negotiated XDND version          */
+static pid_t  xdnd_pid = 0;            /* copy worker, 0 = idle            */
 
+static void xdnd_msg(Window dst, const char *type, long a1, long a2, long a3,
+                     long a4, long a5)
+{
+    XEvent e;
+    memset(&e, 0, sizeof e);
+    e.xclient.type         = ClientMessage;
+    e.xclient.display       = dpy;
+    e.xclient.window        = dst;
+    e.xclient.message_type  = atom(type);
+    e.xclient.format        = 32;
+    e.xclient.data.l[0]     = (long)win_desk;
+    e.xclient.data.l[1]     = a1;
+    e.xclient.data.l[2]     = a2;
+    e.xclient.data.l[3]     = a3;
+    e.xclient.data.l[4]     = a4;
+    e.xclient.data.l[5]     = a5;
+    XSendEvent(dpy, dst, False, NoEventMask, &e);
+    XFlush(dpy);
+}
+
+/* XdndEnter: record the source and which of its offered types we can accept */
+static void xdnd_enter(XClientMessageEvent *ev)
+{
+    xdnd_src  = (Window)ev->data.l[0];
+    xdnd_type = 0;
+    xdnd_ver  = (int)(((unsigned long)ev->data.l[1] >> 24) & 0xff);
+    Atom types[64];
+    int  n = 0;
+    if (ev->data.l[1] & 1) {              /* >3 types -> XdndTypeList */
+        Atom actual = None;
+        int fmt = 0;
+        unsigned long nitems = 0, after = 0;
+        unsigned char *data = NULL;
+        if (XGetWindowProperty(dpy, xdnd_src, atom("XdndTypeList"), 0, 64,
+                               False, XA_ATOM, &actual, &fmt, &nitems, &after,
+                               &data) == Success && data) {
+            if (actual == XA_ATOM && fmt == 32) {
+                long *a = (long *)data;    /* format 32 -> array of longs */
+                for (unsigned long i = 0; i < nitems && n < 64; i++)
+                    types[n++] = (Atom)a[i];
+            }
+            XFree(data);
+        }
+    } else {
+        for (int i = 2; i < 5; i++)
+            if (ev->data.l[i]) types[n++] = (Atom)ev->data.l[i];
+    }
+    Atom want = atom("text/uri-list");
+    for (int i = 0; i < n; i++)
+        if (types[i] == want) { xdnd_type = want; break; }
+}
+
+/* XdndPosition: always answer XdndStatus with XdndActionCopy when we accept,
+ * so the source knows the drop will copy; the whole desktop window is the
+ * valid drop rectangle. */
+static void xdnd_position(XClientMessageEvent *ev)
+{
+    if ((Window)ev->data.l[0] != xdnd_src)
+        xdnd_enter(ev);                   /* source changed mid-drag */
+    xdnd_time = (Time)ev->data.l[3];
+    long flags = xdnd_type ? 1 : 0;
+    long act   = xdnd_type ? (long)atom("XdndActionCopy") : 0;
+    long wh    = ((long)scr_w << 16) | ((long)scr_h & 0xffff);
+    /* XdndStatus field layout cross-checked against Qt (qxcbdrag.cpp) and
+     * GTK (gdkdnd-x11.c): both sources read the action from l[4] (GTK warns
+     * if action==0 disagrees with flags bit0), the drop rectangle from
+     * l[2]/l[3]; l[5] stays 0. */
+    xdnd_msg(xdnd_src, "XdndStatus", flags, 0, wh, act, 0);
+}
+
+/* XdndDrop: pull the data over via a selection transfer */
+static void xdnd_drop(XClientMessageEvent *ev)
+{
+    if (!xdnd_src) return;
+    Time ts = xdnd_time;
+    if (xdnd_ver >= 5 && ev->data.l[2])
+        ts = (Time)ev->data.l[2];         /* v5 carries the timestamp */
+    if (!xdnd_type) {                     /* we never accepted this drag */
+        if (xdnd_ver >= 5)
+            xdnd_msg(xdnd_src, "XdndFinished", 0, 0, 0, 0, 0);
+        xdnd_src = 0;
+        return;
+    }
+    XConvertSelection(dpy, atom("XdndSelection"), xdnd_type,
+                      atom("_ELEVENDE_XDND_DATA"), win_desk, ts);
+}
+
+static void xdnd_finish(void)
+{
+    if (xdnd_src && xdnd_ver >= 5)
+        xdnd_msg(xdnd_src, "XdndFinished", 1, (long)atom("XdndActionCopy"),
+                 0, 0, 0);
+    xdnd_src  = 0;
+    xdnd_type = 0;
+}
+
+/* percent-decode one file:// URI; 0 = success */
+static int xdnd_uri_path(const char *uri, size_t len, char *out, size_t cap)
+{
+    if (len < 7 || strncmp(uri, "file://", 7)) return -1;
+    uri += 7;
+    len -= 7;
+    if (len > 10 && !strncmp(uri, "localhost/", 10)) { uri += 9; len -= 9; }
+    size_t o = 0;
+    for (size_t i = 0; i < len && o + 1 < cap; i++) {
+        unsigned char c = (unsigned char)uri[i];
+        if (c == '%' && i + 2 < len &&
+            isxdigit((unsigned char)uri[i + 1]) &&
+            isxdigit((unsigned char)uri[i + 2])) {
+            char hx[3] = { uri[i + 1], uri[i + 2], 0 };
+            c = (unsigned char)strtol(hx, NULL, 16);
+            i += 2;
+        }
+        if (!c) break;
+        out[o++] = (char)c;
+    }
+    out[o] = 0;
+    return o ? 0 : -1;
+}
+
+/* unique destination path in dir: "a.txt" -> "a (1).txt" (Windows style) */
+static int xdnd_unique_dest(const char *dir, const char *name, char *out,
+                            size_t cap)
+{
+    const char *dot = strrchr(name, '.');
+    char base[400], ext[64];
+    if (dot && dot != name && (size_t)(dot - name) < sizeof base) {
+        size_t bl = (size_t)(dot - name);
+        memcpy(base, name, bl);
+        base[bl] = 0;
+        snprintf(ext, sizeof ext, "%s", dot);
+    } else {
+        snprintf(base, sizeof base, "%s", name);
+        ext[0] = 0;
+    }
+    for (int i = 0; i < 1000; i++) {
+        if (i == 0) snprintf(out, cap, "%s/%s%s", dir, base, ext);
+        else        snprintf(out, cap, "%s/%s (%d)%s", dir, base, i, ext);
+        if (access(out, F_OK) != 0) return 0;
+    }
+    return -1;
+}
+
+static int cp_file(const char *src, const char *dst)
+{
+    struct stat st;
+    if (stat(src, &st) != 0 || !S_ISREG(st.st_mode)) return -1;
+    int in = open(src, O_RDONLY);
+    if (in < 0) return -1;
+    int out = open(dst, O_WRONLY | O_CREAT | O_EXCL, st.st_mode & 07777);
+    if (out < 0) { close(in); return -1; }
+    static char buf[65536];
+    ssize_t r;
+    int ok = 1;
+    while ((r = read(in, buf, sizeof buf)) > 0) {
+        ssize_t off = 0;
+        while (off < r) {
+            ssize_t w = write(out, buf + off, (size_t)(r - off));
+            if (w <= 0) { ok = 0; break; }
+            off += w;
+        }
+        if (!ok) break;
+    }
+    if (r < 0) ok = 0;
+    close(in);
+    close(out);
+    if (!ok) { unlink(dst); return -1; }
+    return 0;
+}
+
+/* recursive copy (directories included); partial failures just skip the
+ * offending entry so one unreadable file does not lose the whole drop */
+static int cp_tree(const char *src, const char *dst, int depth)
+{
+    struct stat st;
+    if (depth > 32 || stat(src, &st) != 0) return -1;
+    if (!S_ISDIR(st.st_mode)) return cp_file(src, dst);
+    if (mkdir(dst, (st.st_mode & 07777) | 0700) != 0) return -1;
+    DIR *d = opendir(src);
+    if (!d) return -1;
+    int ok = 1;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (!de->d_name[0] || de->d_name[0] == '.') continue;
+        char s[1024], t[1024];
+        snprintf(s, sizeof s, "%s/%s", src, de->d_name);
+        snprintf(t, sizeof t, "%s/%s", dst, de->d_name);
+        if (cp_tree(s, t, depth + 1) != 0) ok = 0;
+    }
+    closedir(d);
+    return ok ? 0 : -1;
+}
+
+/* Parse the text/uri-list payload and hand the copying to a child process so
+ * a multi-GB folder never freezes the shell's event loop. The parent polls
+ * xdnd_pid in the main loop and reloads the desktop icons when it exits. */
+static void xdnd_copy_uris(const char *data, size_t len)
+{
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "elevende-shell: XDND fork failed\n");
+        return;
+    }
+    if (pid > 0) { xdnd_pid = pid; return; }
+    /* child: copy files, then vanish (SIGCHLD is ignored -> auto-reaped) */
+    mkdir(desk_dir(), 0755);
+    const char *p = data, *end = data + len;
+    while (p < end) {
+        const char *nl = memchr(p, '\n', (size_t)(end - p));
+        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        while (ll && (p[ll - 1] == '\r' || p[ll - 1] == '\n')) ll--;
+        char path[1024];
+        if (xdnd_uri_path(p, ll, path, sizeof path) == 0) {
+            const char *base = strrchr(path, '/');
+            base = base ? base + 1 : path;
+            char dest[1400];
+            if (base[0] &&
+                xdnd_unique_dest(desk_dir(), base, dest, sizeof dest) == 0)
+                cp_tree(path, dest, 0);
+        }
+        if (!nl) break;
+        p = nl + 1;
+    }
+    _exit(0);
+}
+
+/* SelectionNotify: the source handed us the uri list -> start the copy */
+static void xdnd_receive(XSelectionEvent *ev)
+{
+    if (ev->property == None || !xdnd_src) { xdnd_finish(); return; }
+    Atom actual = None;
+    int fmt = 0;
+    unsigned long nitems = 0, after = 0;
+    unsigned char *data = NULL;
+    if (XGetWindowProperty(dpy, win_desk, atom("_ELEVENDE_XDND_DATA"), 0,
+                           65536, False, AnyPropertyType, &actual, &fmt,
+                           &nitems, &after, &data) != Success || !data) {
+        xdnd_finish();
+        return;
+    }
+    if (fmt == 8 && nitems)
+        xdnd_copy_uris((const char *)data, (size_t)nitems);
+    XFree(data);
+    XDeleteProperty(dpy, win_desk, atom("_ELEVENDE_XDND_DATA"));
+    xdnd_finish();                        /* data is ours now: release the
+                                             source's drag immediately */
+}
 
 static int is_image_file(const char *path) {
     const char *dot = strrchr(path, '.');
@@ -4936,7 +5217,23 @@ int main(void) {
                     wall_ok = 0;
                     wallpaper_init();
                     desk_dirty = 1;
-                }
+                } else if (ev.xclient.message_type == atom("XdndEnter"))
+                    xdnd_enter(&ev.xclient);
+                else if (ev.xclient.message_type == atom("XdndPosition"))
+                    xdnd_position(&ev.xclient);
+                else if (ev.xclient.message_type == atom("XdndLeave")) {
+                    xdnd_src = 0;
+                    xdnd_type = 0;
+                } else if (ev.xclient.message_type == atom("XdndDrop"))
+                    xdnd_drop(&ev.xclient);
+                break;
+            case SelectionNotify:
+                /* only our own XConvertSelection (the XDND data transfer)
+                 * produces this event */
+                if (ev.xselection.property != None)
+                    xdnd_receive(&ev.xselection);
+                else if (xdnd_src)
+                    xdnd_finish();        /* source refused the conversion */
                 break;
             case MapNotify:
                 /* 外部窗口映射只由 Openbox 负责；Shell 不改变任何输入状态。 */
@@ -5273,6 +5570,14 @@ int main(void) {
             shell_reflow(live_w, live_h);
             dirty = 1;
             act_changed = 1;
+        }
+
+        /* XDND drop worker finished copying into ~/Desktop: rescan so the
+         * new files appear as icons (SIGCHLD is ignored, so the process is
+         * already reaped and kill() reports it gone) */
+        if (xdnd_pid > 0 && kill(xdnd_pid, 0) != 0) {
+            xdnd_pid = 0;
+            icons_reload();
         }
 
         /* 不在后台注入鼠标释放或反复发送 moveresize-cancel。旧的“幽灵

@@ -2,10 +2,12 @@
 Type=Application
 Name=照片
 Name[en]=Photos
-Comment=Windows 11 style image viewer (ElevenDE)
-Exec=elevende-photos %F
+Comment=Open images with the system default photo viewer
+# elevende-photos is gone in 3.5.1: tools/elevende-open-photo resolves the
+# system default handler for image/png (xdg-mime + gtk-launch) and falls back
+# to the common Debian viewers. No MimeType= key on purpose, so this entry
+# can never become the default image handler itself (that would recurse).
+Exec=elevende-open-photo %F
 Icon=image-x-generic
 Terminal=false
 Categories=Graphics;Viewer;
-MimeType=image/png;image/jpeg;image/bmp;image/gif;image/webp;image/svg+xml;image/tiff;image/vnd.microsoft.icon;
-StartupWMClass=elevende-photos

@@ -2,8 +2,10 @@
 # ElevenDE 3.5.1 X11 session. Launch: startx /usr/local/bin/elevende-session
 #
 # Paint a base background, run the native C/Xlib shell in the background,
-# then run Openbox in the foreground. The session lasts exactly as long as
-# Openbox; on exit (Log Out -> `openbox --exit`) the shell is stopped.
+# then run Openbox. The session lasts exactly as long as Openbox; on exit
+# (Log Out -> `openbox --exit`) the shell is stopped. While Openbox runs,
+# a small supervision loop restarts the compositor/shell/notifyd if they
+# crash (capped, so a broken binary cannot spin forever).
 
 export XDG_CURRENT_DESKTOP=ElevenDE
 export XDG_SESSION_TYPE=x11
@@ -42,16 +44,18 @@ export DBUS_SESSION_BUS_PID
 
 xsetroot -solid "#113d6b" 2>/dev/null || true
 
-# Login gate: show a Win11-style login screen with a password field before
-# the desktop starts. Skips (or continues) if the lock cannot run.
-if [ -x /usr/local/bin/elevende-lock ]; then
-    echo "elevende-session: login gate"
-    /usr/local/bin/elevende-lock --login || true
-    echo "elevende-session: unlocked"
-fi
+# ---- session helpers --------------------------------------------------------
+# Each helper has a start_* function so the supervision loop near the end can
+# relaunch it after a crash. Logs are appended, never truncated: a restarted
+# process must not erase the crash output of the one it replaced.
 
-echo "elevende-session: starting compositor (picom)"
-if command -v picom >/dev/null 2>&1; then
+COMPOSITOR_PID=""
+SHELL_PID=""
+NOTIFY_PID=""
+SAS_PID=""
+
+start_picom() {
+    command -v picom >/dev/null 2>&1 || return 0
     # XRender is the stable default across Debian hardware and virtual GPUs.
     # GLX Mica is opt-in only: it may require DRI3/EGL and otherwise surfaces
     # a Picom warning dialog before the desktop is usable.
@@ -59,30 +63,88 @@ if command -v picom >/dev/null 2>&1; then
     if [ "${ELEVENDE_ENABLE_GLX_MICA:-0}" = "1" ] && [ -f "$SHARE_DIR/picom-mica.conf" ]; then
         COMPOSITOR_CFG="$SHARE_DIR/picom-mica.conf"
     fi
-    if [ -f "$COMPOSITOR_CFG" ]; then
-        picom --config "$COMPOSITOR_CFG" >/tmp/elevende-picom.log 2>&1 &
+    RUN_CFG="$COMPOSITOR_CFG"
+    # Window open/close animations (wm/picom-anim.conf) need picom >= 12.
+    # Older builds (Ubuntu 24.04 ships 10.x) have no `animations` option, so
+    # append the snippet only when the version checks out, and verify the
+    # result started -- fall back to the plain config if picom rejected it.
+    if [ "${ELEVENDE_NO_ANIM:-0}" != "1" ] && [ -f "$SHARE_DIR/picom-anim.conf" ]; then
+        ver=$(picom --version 2>/dev/null | sed -n 's/^[^0-9]*\([0-9][0-9]*\).*/\1/p' | head -n1)
+        if [ -n "$ver" ] && [ "$ver" -ge 12 ] 2>/dev/null; then
+            RUN_CFG="/tmp/elevende-picom-run.conf"
+            { cat "$COMPOSITOR_CFG"; printf '\n'; cat "$SHARE_DIR/picom-anim.conf"; } \
+                > "$RUN_CFG" 2>/dev/null || RUN_CFG="$COMPOSITOR_CFG"
+        fi
+    fi
+    if [ -f "$RUN_CFG" ]; then
+        picom --config "$RUN_CFG" >>/tmp/elevende-picom.log 2>&1 &
     else
-        picom >/tmp/elevende-picom.log 2>&1 &
+        picom >>/tmp/elevende-picom.log 2>&1 &
     fi
     COMPOSITOR_PID=$!
+    if [ "$RUN_CFG" != "$COMPOSITOR_CFG" ]; then
+        sleep 1
+        if ! kill -0 "$COMPOSITOR_PID" 2>/dev/null; then
+            echo "elevende-session: animated picom config rejected, plain config"
+            picom --config "$COMPOSITOR_CFG" >>/tmp/elevende-picom.log 2>&1 &
+            COMPOSITOR_PID=$!
+        fi
+    fi
+}
+
+start_shell() {
+    echo "elevende-session: starting shell"
+    /usr/local/bin/elevende-shell >>/tmp/elevende-shell.log 2>&1 &
+    SHELL_PID=$!
+}
+
+start_notifyd() {
+    if [ -x /usr/local/bin/elevende-notifyd ]; then
+        echo "elevende-session: starting notification daemon"
+        /usr/local/bin/elevende-notifyd >>/tmp/elevende-notifyd.log 2>&1 &
+        NOTIFY_PID=$!
+    fi
+}
+
+start_sas() {
+    if [ -x /usr/local/bin/sas-screen ]; then
+        echo "elevende-session: starting SAS screen daemon (Ctrl+Alt+Delete)"
+        /usr/local/bin/sas-screen --config "$SHARE_DIR/sas-config.json" \
+            >>/tmp/elevende-sas.log 2>&1 &
+        SAS_PID=$!
+    fi
+}
+
+session_cleanup() {
+    echo "elevende-session: stopping session"
+    [ -n "${OPENBOX_PID:-}" ] && kill "$OPENBOX_PID" 2>/dev/null
+    [ -n "${SHELL_PID:-}" ] && kill "$SHELL_PID" 2>/dev/null
+    [ -n "${SHELL_PID:-}" ] && wait "$SHELL_PID" 2>/dev/null
+    [ -n "${NOTIFY_PID:-}" ] && kill "$NOTIFY_PID" 2>/dev/null
+    [ -n "${SAS_PID:-}" ] && kill "$SAS_PID" 2>/dev/null
+    [ -n "${COMPOSITOR_PID:-}" ] && kill "$COMPOSITOR_PID" 2>/dev/null
+    [ -n "${DBUS_PID:-}" ] && kill "$DBUS_PID" 2>/dev/null
+    true
+}
+
+# Display-manager shutdown sends TERM/HUP; without this trap every session
+# process leaked past logout on some login managers.
+trap 'session_cleanup; exit 0' INT TERM HUP
+
+# Login gate: show a Win11-style login screen with a password field before
+# the desktop starts. Skips (or continues) if the lock cannot run. Runs after
+# the trap above so TERM/HUP during login cannot leak the session bus either.
+if [ -x /usr/local/bin/elevende-lock ]; then
+    echo "elevende-session: login gate"
+    /usr/local/bin/elevende-lock --login || true
+    echo "elevende-session: unlocked"
 fi
 
-echo "elevende-session: starting shell"
-/usr/local/bin/elevende-shell >/tmp/elevende-shell.log 2>&1 &
-SHELL_PID=$!
-
-echo "elevende-session: starting notification daemon"
-if [ -x /usr/local/bin/elevende-notifyd ]; then
-    /usr/local/bin/elevende-notifyd >/tmp/elevende-notifyd.log 2>&1 &
-    NOTIFY_PID=$!
-fi
-
-echo "elevende-session: starting SAS screen daemon (Ctrl+Alt+Delete)"
-if [ -x /usr/local/bin/sas-screen ]; then
-    /usr/local/bin/sas-screen --config "$SHARE_DIR/sas-config.json" \
-        >/tmp/elevende-sas.log 2>&1 &
-    SAS_PID=$!
-fi
+echo "elevende-session: starting compositor (picom)"
+start_picom
+start_shell
+start_notifyd
+start_sas
 
 # Regenerate Openbox rc.xml from the shortcut database (system defaults +
 # user overrides from the Settings app). 3.4.2 introduces a marker because
@@ -104,14 +166,47 @@ fi
 RC_FILE="$USER_CFG_DIR/rc.xml"
 
 echo "elevende-session: starting Openbox ($RC_FILE)"
-openbox --config-file "$RC_FILE"
+openbox --config-file "$RC_FILE" &
+OPENBOX_PID=$!
+
+# Crash supervision. Openbox used to run in the foreground, so a crashed
+# compositor or shell left a bare window manager with no taskbar until the
+# next login. Restart each helper at most 3 times per session: that rides
+# out one-off failures (GPU reset, session bus restart) without ever
+# spinning on a genuinely broken binary.
+PICOM_TRY=0
+SHELL_TRY=0
+NOTIFY_TRY=0
+SAS_TRY=0
+while kill -0 "$OPENBOX_PID" 2>/dev/null; do
+    if [ -n "$COMPOSITOR_PID" ] && ! kill -0 "$COMPOSITOR_PID" 2>/dev/null \
+        && [ "$PICOM_TRY" -lt 3 ]; then
+        PICOM_TRY=$((PICOM_TRY + 1))
+        echo "elevende-session: compositor died, restarting ($PICOM_TRY/3)"
+        start_picom
+    fi
+    if [ -n "$SHELL_PID" ] && ! kill -0 "$SHELL_PID" 2>/dev/null \
+        && [ "$SHELL_TRY" -lt 3 ]; then
+        SHELL_TRY=$((SHELL_TRY + 1))
+        echo "elevende-session: shell died, restarting ($SHELL_TRY/3)"
+        start_shell
+    fi
+    if [ -n "$NOTIFY_PID" ] && ! kill -0 "$NOTIFY_PID" 2>/dev/null \
+        && [ "$NOTIFY_TRY" -lt 3 ]; then
+        NOTIFY_TRY=$((NOTIFY_TRY + 1))
+        echo "elevende-session: notify daemon died, restarting ($NOTIFY_TRY/3)"
+        start_notifyd
+    fi
+    if [ -n "$SAS_PID" ] && ! kill -0 "$SAS_PID" 2>/dev/null \
+        && [ "$SAS_TRY" -lt 3 ]; then
+        SAS_TRY=$((SAS_TRY + 1))
+        echo "elevende-session: SAS daemon died, restarting ($SAS_TRY/3)"
+        start_sas
+    fi
+    sleep 2
+done
+wait "$OPENBOX_PID" 2>/dev/null
 rc=$?
 
-echo "elevende-session: Openbox exited ($rc), stopping session"
-kill "$SHELL_PID" 2>/dev/null || true
-wait "$SHELL_PID" 2>/dev/null || true
-[ -n "${NOTIFY_PID:-}" ] && kill "$NOTIFY_PID" 2>/dev/null || true
-[ -n "${SAS_PID:-}" ] && kill "$SAS_PID" 2>/dev/null || true
-[ -n "${COMPOSITOR_PID:-}" ] && kill "$COMPOSITOR_PID" 2>/dev/null || true
-[ -n "${DBUS_PID:-}" ] && kill "$DBUS_PID" 2>/dev/null || true
+session_cleanup
 exit $rc

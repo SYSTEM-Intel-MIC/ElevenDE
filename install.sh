@@ -282,6 +282,13 @@ if [ -n "$LOGIN_USER" ]; then
         if [ ! -f "$UHOME/.config/mimeapps.list" ]; then
             cp "$SRC_DIR/assets/mimeapps.list" "$UHOME/.config/mimeapps.list"
             chown "$LOGIN_USER":"$(id -gn "$LOGIN_USER")" "$UHOME/.config/mimeapps.list" 2>/dev/null || true
+        elif grep -q "elevende-photos" "$UHOME/.config/mimeapps.list" 2>/dev/null; then
+            # Upgrade migration: elevende-photos was removed in 3.5.1. Strip
+            # the stale entries so image/* falls through to the system default
+            # viewer instead of pointing at a desktop file that no longer
+            # exists (leaving the rest of the user's file untouched).
+            sed -i 's/elevende-photos\.desktop;//g' "$UHOME/.config/mimeapps.list"
+            chown "$LOGIN_USER":"$(id -gn "$LOGIN_USER")" "$UHOME/.config/mimeapps.list" 2>/dev/null || true
         fi
     fi
 fi
@@ -310,7 +317,7 @@ fi
 
 # Qt apps
 if [ "$APPS_OK" = 1 ]; then
-    for app in elevende-notepad elevende-calc elevende-taskmgr elevende-settings elevende-photos; do
+    for app in elevende-notepad elevende-calc elevende-taskmgr elevende-settings; do
         [ -x "$BUILD_DIR/apps/$app" ] && install -m755 "$BUILD_DIR/apps/$app" "$BIN/$app"
     done
 fi
@@ -323,6 +330,8 @@ install -Dm644 "$SRC_DIR/wm/sas-config.json" "$SHARE/sas-config.json"
 install -Dm644 "$SRC_DIR/wm/menu.xml"        "$SHARE/menu.xml"
 install -Dm644 "$SRC_DIR/wm/picom.conf"      "$SHARE/picom.conf"
 install -Dm644 "$SRC_DIR/wm/picom-mica.conf" "$SHARE/picom-mica.conf"
+# animation snippet: appended at runtime by elevende-session on picom >= 12
+install -Dm644 "$SRC_DIR/wm/picom-anim.conf" "$SHARE/picom-anim.conf"
 install -Dm644 "$SRC_DIR/assets/material/mica-noise.png" "$SHARE/material/mica-noise.png"
 # Debian Openbox searches /usr/share/themes; using only /usr/local/share
 # causes a silent fallback to the stock blue decoration.
@@ -331,6 +340,8 @@ install -m644 "$SRC_DIR"/wm/ElevenDE/openbox-3/* "/usr/share/themes/ElevenDE/ope
 
 # session entry
 install -Dm755 "$SRC_DIR/session/elevende-session" "$BIN/elevende-session"
+# helper for the photos.desktop menu entry (no bundled viewer anymore)
+install -Dm755 "$SRC_DIR/tools/elevende-open-photo" "$BIN/elevende-open-photo"
 install -Dm644 "$SRC_DIR/assets/xresources.elevende" /etc/X11/Xresources.d/elevende
 install -Dm644 "$SRC_DIR/assets/elevende.desktop" /usr/share/xsessions/elevende.desktop
 

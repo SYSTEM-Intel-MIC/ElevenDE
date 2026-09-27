@@ -68,7 +68,9 @@ jobs:
               usr/local/bin/elevende-calc \
               usr/local/bin/elevende-taskmgr \
               usr/local/bin/elevende-settings \
-              usr/local/bin/elevende-photos \
+              usr/local/bin/elevende-open-photo \
+              usr/local/share/applications/photos.desktop \
+              usr/local/share/elevende-shell/picom-anim.conf \
               usr/share/xsessions/elevende.desktop \
               usr/share/themes/ElevenDE/openbox-3/themerc; do
             if ! grep -q "\./$f\$" <<<"$LIST"; then
@@ -76,6 +78,12 @@ jobs:
               missing=1
             fi
           done
+          # 3.5.1 removed the bundled Photos app: the menu entry must stay
+          # (it maps to the system default viewer) but the binary must not.
+          if grep -q "\./usr/local/bin/elevende-photos\$" <<<"$LIST"; then
+            echo "::error::elevende-photos binary should have been removed"
+            missing=1
+          fi
           if ! grep -qE '^-rwsr-xr-x .* \./usr/local/bin/elevende-lock$' <<<"$LIST"; then
             echo "::error::elevende-lock lost its setuid bit"
             missing=1
