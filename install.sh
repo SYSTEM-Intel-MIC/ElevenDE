@@ -344,6 +344,8 @@ install -Dm755 "$SRC_DIR/session/elevende-session" "$BIN/elevende-session"
 install -Dm755 "$SRC_DIR/tools/elevende-open-photo" "$BIN/elevende-open-photo"
 install -Dm644 "$SRC_DIR/assets/xresources.elevende" /etc/X11/Xresources.d/elevende
 install -Dm644 "$SRC_DIR/assets/elevende.desktop" /usr/share/xsessions/elevende.desktop
+# boot-straight-into-ElevenDE helper (README "启动 ElevenDE 并设为默认桌面")
+install -Dm755 "$SRC_DIR/tools/elevende-setup-autologin" "$BIN/elevende-setup-autologin"
 
 # Upgrade migration: stale per-user rc.xml files preserve the pre-3.4.2 mouse
 # bindings. Remove only files without the revision marker; the next session

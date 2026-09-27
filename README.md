@@ -48,11 +48,65 @@ FLUENT_SOURCE=/path/to/fluentui-system-icons/assets \
 sudo apt install ./elevende_3.5.1_amd64.deb
 ```
 
-安装后可从显示管理器选择 ElevenDE 会话，或按照项目安装提示配置自动登录。源码安装适用于开发环境：
+安装后可从显示管理器选择 ElevenDE 会话，或按下方教程配置开机直进；源码安装适用于开发环境：
 
 ```sh
 sudo ./install.sh
 ```
+
+## 启动 ElevenDE 并设为默认桌面
+
+安装（`.deb` 或源码安装均可）后，会话入口位于 `/usr/share/xsessions/elevende.desktop`（会话 ID 为 `elevende`，显示名 **ElevenDE**），可用下述任一方式进入。
+
+### 方式一：登录界面选择（保留显示管理器）
+
+1. 注销当前桌面（右上角电源菜单 → Log Out）。
+2. GDM 登录页点击右上角**齿轮 ⚙**（会话选择器）→ 选择 **ElevenDE** → 登录。GDM 会记住每个用户上次的会话，之后登录默认即为 ElevenDE。
+3. 若希望新用户也默认进入（无需每次选择），固定为全局默认：
+
+   ```sh
+   # /var/lib/AccountsService/users/<用户名> 的 [User] 段下添加：
+   # XSession=elevende
+   sudo systemctl restart accounts-daemon   # 或直接重启
+   ```
+
+   使用 LightDM 的机器（用 `cat /etc/X11/default-display-manager` 查看当前显示管理器）改在 `/etc/lightdm/lightdm.conf` 的 `[Seat:*]` 段设置 `user-session=elevende`；需要自动登录时对应设置 `autologin-session=elevende`。
+
+### 方式二：开机直进 ElevenDE（`elevende-setup-autologin`）
+
+随包安装的 `elevende-setup-autologin` 会把机器配置为**开机绕过图形登录界面、直接进入 ElevenDE**：
+
+```sh
+sudo elevende-setup-autologin [用户名]
+sudo reboot
+```
+
+- 用户名可省略：默认取 `$SUDO_USER`（即执行 sudo 的用户），否则取 `/home` 下的第一个用户。
+- 工具具体做的事（每一步都可手工还原）：
+  1. 写入 systemd drop-in `/etc/systemd/system/getty@tty1.service.d/autologin.conf`，让 tty1 控制台开机**免密自动登录**到该用户；
+  2. 写入 `/etc/profile.d/elevende-session.sh`：当该用户在 tty1 登录且没有 `DISPLAY` 时自动 `exec startx /usr/local/bin/elevende-session`，直接进入 ElevenDE；
+  3. 将 systemd 默认启动目标设为 `multi-user.target`（文本控制台，不启动图形登录界面）；
+  4. 禁用 `gdm3`/`gdm`/`lightdm`/`sddm`/`slim`，避免显示管理器重新抢占开机流程。
+- **注意**：该方式为免密自动登录，任何能接触这台机器的人都会直接进入桌面，仅建议家用单人机器使用；需要登录保护时请用方式一。
+
+  还原（恢复显示管理器 + 图形启动）：
+
+  ```sh
+  sudo rm /etc/profile.d/elevende-session.sh \
+         /etc/systemd/system/getty@tty1.service.d/autologin.conf
+  sudo systemctl set-default graphical.target
+  sudo systemctl enable gdm3     # 或你原来使用的显示管理器
+  ```
+
+### 方式三：手动启动（临时体验或排查）
+
+不经过显示管理器，从任意 TTY 控制台执行：
+
+```sh
+startx /usr/local/bin/elevende-session
+```
+
+退出该会话即返回控制台，对系统配置无任何改动，适合安装后的首次验证。
 
 ## 目录与维护边界
 
