@@ -34,6 +34,8 @@
 #include <QSortFilterProxyModel>
 #include <QStackedWidget>
 #include <QStorageInfo>
+#include <QTimer>
+#include <QTouchEvent>
 #include <QTreeView>
 #include <QUrl>
 #include <QVariant>
@@ -624,6 +626,27 @@ FileList::FileList(QWidget *parent)
                         (QObject *)m_treeView, (QObject *)m_treeView->viewport() })
         o->installEventFilter(this);
 
+    /* Touch input (3.5.1): the file list must respond like Windows 11
+     * Explorer on a tablet -- tap selects, double-tap opens, holding still
+     * for half a second opens the context menu and dragging scrolls the list
+     * under the finger instead of starting a drag-and-drop.  Viewport-level
+     * WA_AcceptTouchEvents so Qt delivers QTouchEvent instead of silently
+     * converting it to mouse clicks. */
+    for (QWidget *vp : { m_iconView->viewport(), m_listView->viewport(),
+                         m_treeView->viewport() })
+        vp->setAttribute(Qt::WA_AcceptTouchEvents, true);
+    m_touchTimer = new QTimer(this);
+    m_touchTimer->setSingleShot(true);
+    m_touchTimer->setInterval(500);
+    connect(m_touchTimer, &QTimer::timeout, this, [this]() {
+        if (m_touchMenuFired || m_touchScrolling || m_menuOpen)
+            return;
+        if (!m_touchActive)
+            return;
+        m_touchMenuFired = true;
+        onContextMenu(m_touchOrigin);          /* same menu as a right-click */
+    });
+
     m_mode = IconView;
     QSettings s(QStringLiteral("ExplorerForLinux"), QStringLiteral("Explorer"));
     int saved = s.value(QLatin1String(kViewKey), (int)IconView).toInt();
@@ -1010,6 +1033,16 @@ void FileList::openFile(const QString &path)
 
 bool FileList::eventFilter(QObject *obj, QEvent *event)
 {
+    /* Touch state must be tracked even while a menu is up (the finger can
+     * still be down when the long-press menu opens), so handle touch first. */
+    if (event->type() == QEvent::TouchBegin ||
+        event->type() == QEvent::TouchUpdate ||
+        event->type() == QEvent::TouchEnd ||
+        event->type() == QEvent::TouchCancel) {
+        if (isFileView(obj))
+            return handleTouchEvent(obj, static_cast<QTouchEvent *>(event));
+        return QWidget::eventFilter(obj, event);
+    }
     if (m_menuOpen)
         return QWidget::eventFilter(obj, event);  /* one menu per gesture */
     if (isFileView(obj) && event->type() == QEvent::ContextMenu) {
@@ -1029,6 +1062,116 @@ bool FileList::eventFilter(QObject *obj, QEvent *event)
         return true;
     }
     return QWidget::eventFilter(obj, event);
+}
+
+/* One-finger gesture driver for the three file views.  Qt on X11 hands us
+ * QTouchEvent only when the viewport opted in; without it a long-press is
+ * just a press/release pair and there is no way to tell a finger from a
+ * mouse, so Windows-11-style tablet gestures were impossible.
+ *   - finger down  -> arm the 500 ms long-press timer;
+ *   - finger moves past the threshold -> scroll the view under the finger
+ *     (and cancel the timer: a swipe is not a long-press);
+ *   - finger up without moving -> select the item, second tap opens it;
+ *   - finger held still -> the context menu, identical to a right-click. */
+bool FileList::handleTouchEvent(QObject *obj, QTouchEvent *ev)
+{
+    const QEvent::Type t = ev->type();
+    QWidget *w = qobject_cast<QWidget *>(obj);
+    if (!w)
+        return QWidget::eventFilter(obj, ev);
+    auto *sa = qobject_cast<QAbstractScrollArea *>(w);
+    QWidget *vp = sa ? sa->viewport() : w;
+    const auto pts = ev->points();
+
+    if (t == QEvent::TouchCancel) {
+        touchReset();
+        ev->accept();
+        return true;
+    }
+
+    if (t == QEvent::TouchBegin) {
+        if (pts.isEmpty()) { ev->accept(); return true; }
+        touchReset();
+        m_touchActive = true;
+        m_touchOrigin = vp->mapFromGlobal(pts.first().globalPosition().toPoint());
+        m_touchLast = m_touchOrigin;
+        m_touchTimer->start();
+        ev->accept();
+        return true;
+    }
+
+    if (pts.isEmpty()) {
+        ev->accept();
+        return true;
+    }
+    const QPoint p = vp->mapFromGlobal(pts.first().globalPosition().toPoint());
+    const QPoint delta = p - m_touchLast;
+    const QPoint total = p - m_touchOrigin;
+
+    if (t == QEvent::TouchUpdate) {
+        if (!m_touchScrolling &&
+            (qAbs(total.x()) > 8 || qAbs(total.y()) > 8)) {
+            m_touchScrolling = true;      /* a swipe: kill the long-press */
+            m_touchTimer->stop();
+        }
+        if (m_touchScrolling) {
+            if (auto *sa2 = qobject_cast<QAbstractScrollArea *>(
+                    currentViewWidget())) {
+                if (QScrollBar *vsb = sa2->verticalScrollBar())
+                    vsb->setValue(vsb->value() - delta.y());
+                if (QScrollBar *hsb = sa2->horizontalScrollBar())
+                    hsb->setValue(hsb->value() - delta.x());
+            }
+        }
+        m_touchLast = p;
+        ev->accept();
+        return true;
+    }
+
+    /* TouchEnd */
+    m_touchTimer->stop();
+    const bool scrolled = m_touchScrolling;
+    const bool menuFired = m_touchMenuFired;
+    const bool wasActive = m_touchActive;
+    touchReset();
+    ev->accept();
+    if (scrolled || menuFired || !wasActive)
+        return true;
+    /* plain tap: select, second tap within 400 ms opens */
+    const QModelIndex idx = currentIndexAt(p);
+    QAbstractItemView *v = currentView();
+    if (!idx.isValid()) {
+        if (v && v->selectionModel())
+            v->selectionModel()->clearSelection();
+        m_tapTimeMs = 0;
+        m_tapIndex = QModelIndex();
+        return true;
+    }
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (v && v->selectionModel()) {
+        v->selectionModel()->clearSelection();
+        v->selectionModel()->select(idx, QItemSelectionModel::Select |
+                                              QItemSelectionModel::Rows);
+        v->setCurrentIndex(idx);
+    }
+    if (now - m_tapTimeMs < 400 && m_tapIndex == idx) {
+        m_tapTimeMs = 0;
+        m_tapIndex = QModelIndex();
+        onOpenIndex(idx);
+    } else {
+        m_tapTimeMs = now;
+        m_tapIndex = idx;
+    }
+    return true;
+}
+
+void FileList::touchReset()
+{
+    if (m_touchTimer)
+        m_touchTimer->stop();
+    m_touchActive = false;
+    m_touchScrolling = false;
+    m_touchMenuFired = false;
 }
 
 /* pos may be relative to a view OR to its viewport; normalize it to viewport

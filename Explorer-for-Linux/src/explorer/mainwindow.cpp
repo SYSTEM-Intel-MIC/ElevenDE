@@ -17,6 +17,7 @@
 #include <QPushButton>
 #include <QRandomGenerator>
 #include <QStackedWidget>
+#include <QStandardPaths>
 #include <QStatusBar>
 #include <QStyle>
 #include <QTimer>
@@ -429,11 +430,29 @@ QWidget *MainWindow::buildSidebar()
 
     layout->addWidget(sectionTitle(tr("快速访问")));
     m_sidebar = makeList(panel);
+    /* XDG user dirs, not a hand-typed ~/Desktop: on a system where the
+       localised/redirected XDG folders differ (or the first run hasn't
+       created them yet) the old hardcoded paths did not exist and every
+       Quick-access button dead-ended with "找不到路径". */
+    auto xdg = [](QStandardPaths::StandardLocation loc, const char *fallbackSub) {
+        QString p = QStandardPaths::writableLocation(loc);
+        if (p.isEmpty())
+            p = QDir::homePath() + QLatin1String(fallbackSub);
+        return p;
+    };
     addItem(m_sidebar, tr("主页"), QDir::homePath(), QStringLiteral("user-home"), QStyle::SP_DirHomeIcon);
-    addItem(m_sidebar, tr("桌面"), QDir::homePath() + QStringLiteral("/Desktop"), QStringLiteral("desktop"), QStyle::SP_DirIcon);
-    addItem(m_sidebar, tr("下载"), QDir::homePath() + QStringLiteral("/Downloads"), QStringLiteral("downloads"), QStyle::SP_DirIcon);
-    addItem(m_sidebar, tr("文档"), QDir::homePath() + QStringLiteral("/Documents"), QStringLiteral("documents"), QStyle::SP_DirIcon);
-    addItem(m_sidebar, tr("图片"), QDir::homePath() + QStringLiteral("/Pictures"), QStringLiteral("pictures"), QStyle::SP_DirIcon);
+    addItem(m_sidebar, tr("桌面"),
+            xdg(QStandardPaths::DesktopLocation, "/Desktop"),
+            QStringLiteral("desktop"), QStyle::SP_DirIcon);
+    addItem(m_sidebar, tr("下载"),
+            xdg(QStandardPaths::DownloadLocation, "/Downloads"),
+            QStringLiteral("downloads"), QStyle::SP_DirIcon);
+    addItem(m_sidebar, tr("文档"),
+            xdg(QStandardPaths::DocumentsLocation, "/Documents"),
+            QStringLiteral("documents"), QStyle::SP_DirIcon);
+    addItem(m_sidebar, tr("图片"),
+            xdg(QStandardPaths::PicturesLocation, "/Pictures"),
+            QStringLiteral("pictures"), QStyle::SP_DirIcon);
     layout->addWidget(m_sidebar, 1);
 
     layout->addSpacing(2);
@@ -643,6 +662,11 @@ void MainWindow::onSidebarActivated(QListWidgetItem *item)
     if (!item)
         return;
     QString target = item->data(Qt::UserRole).toString();
+    /* The first click on a Quick-access entry can happen before the XDG
+       dirs exist on a fresh profile: create them so the button navigates
+       instead of dead-ending on "找不到路径". */
+    if (target.startsWith(QLatin1Char('/')))
+        QDir().mkpath(target);
     navigateTo(target);
 }
 

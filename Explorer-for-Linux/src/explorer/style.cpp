@@ -37,6 +37,10 @@ QTreeView { background: #1B1B1B; border: none; color: #E8E8E8; }
 QTreeView::item { padding: 1px 1px; }
 QTreeView::item:hover { background: #2E2E2E; }
 QTreeView::item:selected { background: #3A3A4E; color: #FFFFFF; }
+QListView { background: #1B1B1B; border: none; color: #E8E8E8; }
+QListView::item { padding: 1px 1px; border-radius: 3px; }
+QListView::item:hover { background: #2E2E2E; }
+QListView::item:selected { background: #3A3A4E; color: #FFFFFF; }
 QHeaderView::section { background: #1B1B1B; border: none; border-bottom: 1px solid #333333; border-right: 1px solid #2A2A2A; padding: 3px 6px; color: #C8C8C8; font-weight: normal; }
 QPushButton { background: transparent; border: none; border-radius: 4px; padding: 4px 10px; color: #E8E8E8; }
 QPushButton:hover { background: #3A3A3A; }
@@ -98,6 +102,10 @@ QTreeView { background: #FFFFFF; border: none; color: #1F1F1F; }
 QTreeView::item { padding: 1px 1px; }
 QTreeView::item:hover { background: #F0F6FC; }
 QTreeView::item:selected { background: #CBE4F6; color: #1F1F1F; }
+QListView { background: #FFFFFF; border: none; color: #1F1F1F; }
+QListView::item { padding: 1px 1px; border-radius: 3px; }
+QListView::item:hover { background: #F0F6FC; }
+QListView::item:selected { background: #CBE4F6; color: #1F1F1F; }
 QHeaderView::section { background: #FFFFFF; border: none; border-bottom: 1px solid #E0E0E0; border-right: 1px solid #ECECEC; padding: 3px 6px; color: #616161; font-weight: normal; }
 QPushButton { background: transparent; border: none; border-radius: 4px; padding: 4px 10px; color: #1F1F1F; }
 QPushButton:hover { background: #E8E8E8; }

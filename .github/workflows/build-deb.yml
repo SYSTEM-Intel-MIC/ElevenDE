@@ -91,6 +91,46 @@ jobs:
           [ "$missing" -eq 0 ]
           echo "package content check passed"
 
+      # Guard the 3.5.1 behaviour set: the source-level features below must
+      # survive into the shipped binary, and the README must document them.
+      - name: Check 3.5.1 behaviour assertions
+        run: |
+          set -euo pipefail
+          dpkg-deb -x elevende_3.5.1_amd64.deb /tmp/elevende-root
+          SHELL_BIN=/tmp/elevende-root/usr/local/bin/elevende-shell
+          fail=0
+          # native Wi-Fi quick settings (replaces `sas-screen --network`)
+          if ! grep -aq "nmcli" "$SHELL_BIN"; then
+            echo "::error::shell is missing the native Wi-Fi panel (nmcli)"
+            fail=1
+          fi
+          # touch long-press -> context menu (the shell draws these labels)
+          if ! grep -aq "固定到开始菜单" "$SHELL_BIN"; then
+            echo "::error::start-menu long-press context menu is missing"
+            fail=1
+          fi
+          # fullscreen auto-hide taskbar reads _NET_WM_STATE_FULLSCREEN
+          if ! grep -aq "_NET_WM_STATE_FULLSCREEN" "$SHELL_BIN"; then
+            echo "::error::fullscreen auto-hide taskbar is missing"
+            fail=1
+          fi
+          # .desktop localisation + icon path handling
+          if ! grep -aq "LC_MESSAGES" "$SHELL_BIN"; then
+            echo "::error::.desktop locale resolution is missing"
+            fail=1
+          fi
+          # default-apps page must ship the extended MIME categories
+          grep -q "默认应用覆盖网页" README.md || {
+            echo "::error::README does not document the extended default-apps list"; fail=1; }
+          grep -q "触摸与手势" README.md || {
+            echo "::error::README does not document touch gestures"; fail=1; }
+          grep -q "原生 Wi-Fi 快捷面板" README.md || {
+            echo "::error::README does not document the Wi-Fi panel"; fail=1; }
+          grep -q "默认应用" README.md || {
+            echo "::error::README does not document default apps"; fail=1; }
+          [ "$fail" -eq 0 ]
+          echo "3.5.1 behaviour assertions passed"
+
       # Dry run only: proves the Depends field resolves on a clean runner
       # without downloading the full X11/openbox runtime stack.
       - name: Check dependency resolution
