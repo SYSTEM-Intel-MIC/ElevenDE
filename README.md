@@ -1,4 +1,4 @@
-# ElevenDE 3.5.1
+# ElevenDE 3.6
 
 **ElevenDE** 是面向 Debian 系发行版的 X11 桌面环境。项目以 C/Xlib Shell、Openbox、picom、Qt 6 与 GTK 3 为基础，提供接近 Windows 11 的浅色视觉层次、桌面、任务栏、开始菜单、登录页、设置与 资源管理器，同时保持 Linux 应用和 X11 窗口管理器生态的兼容性。
 
@@ -6,13 +6,23 @@
 
 > **发布原则。** 源码、构建脚本、配置和可再生成资源保存在 Git 仓库；`*.deb` 不提交到仓库，而是仅作为 GitHub Release 的附件发布。这样发布包始终能够对应一个可审计的源代码提交。
 
-## 3.5.1 发布重点
+## 3.6 发布重点
 
-3.5.1 集中完善 Lindows 桌面的可用性与 Windows 11 风格的一致性。任务栏会根据 X11 `WM_CLASS` 优先解析受控图标资源，终端 `xterm`、设置、计算器、记事本、任务管理器和资源管理器都拥有稳定的第一方图标映射。开始菜单会监测用户、系统与 Flatpak 应用目录，安装、删除或更新 `.desktop` 启动器后可在运行中自动刷新；启动条目时优先通过 `gtk-launch`/GIO 按标准 desktop ID 解析，避免将应用的启动器或 Desktop Action 错交给资源管理器。桌面 Shell 在壁纸切换时同时使用原子文件替换、根窗口版本属性和客户端消息通知，以减少单次 X11 通知遗漏造成的延迟刷新。资源管理器窗口之间以及外部应用到资源管理器均可直接拖放，落点始终执行复制而不移动源文件；桌面图标拖拽对齐资源管理器的交互方式，引入拖拽阈值、光标跟随的浮动图标、落位格动画与占位交换，不再出现图标重叠或轻微手抖破坏双击；开始菜单搜索结果的点击不会穿透到下方的固定项；默认壁纸更换为 `wallpaper-bloom-blue.png`。
+3.6 把日常交互手感补齐到 Windows 11 的水平，并修复一批视觉与可用性缺陷：触摸/长按、键盘导航、图标闪烁、全屏遮挡、托盘对齐、侧栏失效和默认应用覆盖范围。本版本同时把发布流程迁移到 GitHub Actions——push、`v*` 标签、PR 与手动触发都会自动构建、校验并冒烟测试 `.deb`，打标签时自动把包附加到同版本 GitHub Release，`*.deb` 始终不进仓库。
 
-本版本同时完成四项体验升级：**内置照片程序移除**，开始菜单保留“照片”入口并改为启动系统默认图片查看器（`xdg-mime` 解析 + `gtk-launch`，回退到 eog/Loupe/xviewer 等常见查看器，`image/*` 关联不再指向已删除的启动器）；**文件拖放**，资源管理器的图标/列表/详情三个视图都可将文件拖出（Qt XDND 源），桌面 Shell 实现 XDND v5 目标，把拖到桌面的文件复制进 `~/Desktop` 并立即显示为图标（复制在子进程执行，拖入大目录不会卡住 Shell），同样的拖放也可投递给其他支持 XDND 的程序；**会话稳定性**，`elevende-session` 增加监督循环，picom、Shell、通知守护和 SAS 守护崩溃后可有限次自动重启，并补上 TERM/HUP 清理会话进程的 trap；**动画打磨**，开始菜单关闭时增加与打开对称的下滑动画，资源管理器目录树启用展开动画，picom ≥ 12 的系统会自动附加窗口打开/关闭动画预设（旧版本如 Ubuntu 24.04 的 picom 10.x 不认识该配置，会话脚本按版本跳过并在启动失败时自动回退到稳定配置）。终端 `xterm` 本身不支持 XDND，无法接收拖放——这是上游程序限制，拖放目标为桌面和其他 XDND 程序。
+**触摸与长按**：开始菜单、搜索结果、任务栏任务按钮和桌面图标按下后不再立刻触发，而是等释放时激活；按住 0.5 秒弹出与右键完全相同的上下文菜单，超过 6 像素的移动转为拖动——结果列表随手指滚动、桌面图标继续原有的格位拖拽。资源管理器三个视图支持点按选中、400 毫秒内双击进入、500 毫秒长按菜单和手指滚动（`WA_AcceptTouchEvents` + `QTouchEvent`，不再依赖合成鼠标事件）。
 
-| 区域 | 3.5.1 行为 |
+**原生 Wi-Fi 快捷面板**：点击托盘网络图标弹出 Win11 风格面板，`nmcli` 异步扫描、开关射频、信号格与锁标识、点按连接，受保护网络缺失凭据时进入密码输入；面板与音量、日历、电源、开始菜单、搜索互斥，同一时间只展开一个，点击面板外收起，不再跳转到其他设置程序。
+
+**默认应用覆盖网页**：设置 → 默认应用扩展为 11 类，覆盖网页、邮件、Word/Excel/PowerPoint、图像、视频、音频、压缩包、文本、PDF 与磁盘映像，MIME 集合扩充到 gif/webp/svg、mkv/webm/avi、flac/ogg/wav、rar/tar/gzip、markdown/json 等常用格式。
+
+**其余修复与打磨**：开始菜单键盘高亮改为绝对行号与可见区对齐，Page 键翻页自动滚入可视区，选中框不再在滚动后消失；`.desktop` 按 `LC_ALL` → `LC_MESSAGES` → `LANG` 解析本地化 `Name[]`/`Icon[]`，图标支持绝对路径与去后缀，启动走 `gio launch` 回退 `xdg-open`；任务栏图标缓存拆成「已请求 / 已就绪」两级并按窗口前缀失效，只有 `_NET_WM_ICON`/`WM_CLASS` 变化才重建，`StartupWMClass` 匹配不到时回退到启动器自带图标，消除启动瞬间的空白与闪烁；桌面图标点击不再因选中动画重启而闪烁，选择高亮改为与资源管理器一致的 `#CBE4F6` 浅色填充，磁盘分区不再作为桌面图标出现；检测 `_NET_WM_STATE_FULLSCREEN` 后自动隐藏任务栏，指针贴近底边临时露出；托盘图标在槽位内居中、状态区宽度与网络图标位置对齐；资源管理器侧栏快速访问改用 `QStandardPaths` 的 XDG 目录并在缺失时自动创建，`QListView` 补齐与 `QTreeView` 一致的选中配色。
+
+本版本还完成一批基础改造：**内置照片程序移除**，开始菜单保留“照片”入口并改为启动系统默认图片查看器（`xdg-mime` 解析 + `gtk-launch`，回退到 eog/Loupe/xviewer 等常见查看器，`image/*` 关联不再指向已删除的启动器）；**文件拖放**，资源管理器的图标/列表/详情三个视图都可将文件拖出（Qt XDND 源），桌面 Shell 实现 XDND v5 目标，把拖到桌面的文件复制进 `~/Desktop` 并立即显示为图标（复制在子进程执行，拖入大目录不会卡住 Shell），资源管理器窗口之间以及外部应用到资源管理器之间的落点同样执行复制而不移动源文件——拖放语义统一为**复制**；**会话稳定性**，`elevende-session` 增加监督循环，picom、Shell、通知守护和 SAS 守护崩溃后可有限次自动重启，并补上 TERM/HUP 清理会话进程的 trap；**动画打磨**，开始菜单关闭时增加与打开对称的下滑动画，资源管理器目录树启用展开动画，picom ≥ 12 的系统会自动附加窗口打开/关闭动画预设（旧版本如 Ubuntu 24.04 的 picom 10.x 不认识该配置，会话脚本按版本跳过并在启动失败时自动回退到稳定配置）；**命名统一**，应用内与文档中的“Lindows 资源管理器”改称**资源管理器**，上游 MIT 归属与品牌边界表述保持不变；**默认壁纸**更换为 `wallpaper-bloom-blue.png`。终端 `xterm` 本身不支持 XDND，无法接收拖放——这是上游程序限制，拖放目标为桌面和其他 XDND 程序。
+
+完整的历史变更见 [`CHANGELOG.md`](CHANGELOG.md)。
+
+| 区域 | 3.6 行为 |
 |---|---|
 | 桌面与任务栏 | 支持动态任务按钮布局、窗口销毁后的即时按钮清理、网络/音量/电池状态图标、输入法标识、显示桌面与 Win11 风格开始菜单；开始菜单可发现新安装的 XDG/Flatpak 应用并按 desktop ID 启动。 |
 | 登录与锁屏 | 使用系统账户显示名、官方 Fluent 默认用户头像、密码框、焦点状态与无密码账户兼容的认证路径。 |
@@ -32,16 +42,15 @@
 | 托盘与 Wi-Fi | 托盘图标在槽位内居中对齐，状态区宽度与网络图标位置对齐；点击网络图标弹出原生 Wi-Fi 快捷面板（`nmcli` 异步扫描、开关 Wi-Fi、信号格与锁标识、点按连接、受保护网络弹出密码框），不再跳转到其他设置程序。 |
 | 默认应用 | 设置 → 默认应用覆盖网页、邮件、Word/Excel/PowerPoint、图像、视频、音频、压缩包、文本、PDF 与磁盘映像共 11 类，MIME 集合扩展到 gif/webp/svg、mkv/webm/avi、flac/ogg/wav、rar/tar/gzip、markdown/json 等常用格式。 |
 | 资源管理器侧栏 | 快速访问改用 XDG 标准目录（`QStandardPaths`），目录不存在时自动创建，侧栏按钮不再因路径缺失而提示“找不到路径”；`QListView` 补齐选中/悬停配色，与 `QTreeView` 一致。 |
+| 持续集成 | `build-deb.yml` 在 push/`v*` 标签/PR/手动触发时自动构建 `elevende_3.6_amd64.deb`，依次执行包内容校验、行为断言、依赖解析 dry run、Xvfb 冒烟测试与制品上传；`v*` 标签校验通过后自动附加到同版本 GitHub Release。 |
 
-本版本再补齐一批 Windows 11 桌面的日常交互：**触摸与长按**，开始菜单、搜索结果、任务栏任务按钮和桌面图标在按下后不再立刻触发，而是等释放时激活，按住 0.5 秒会弹出与右键完全相同的上下文菜单，超过 6 像素的移动则转为拖动——结果列表随手指滚动、桌面图标继续原有的格位拖拽，资源管理器三个视图也支持点按选中、双击进入、长按菜单和手指滚动（`WA_AcceptTouchEvents` + `QTouchEvent`，不再依赖合成鼠标事件）；**键盘导航**，开始菜单搜索/应用列表的高亮行改成绝对行号与可见行数对齐，PageUp/PageDown 翻页会把高亮项滚进可视区，选中框不会在滚动后消失；**`.desktop` 本地化**，按 `LC_ALL` → `LC_MESSAGES` → `LANG` 优先级解析 `Name[]`/`Icon[]` 本地化键，支持绝对图标路径与去后缀，启动改走 `gio launch` 回退 `xdg-open`；**任务栏图标稳定**，图标缓存拆成“请求过”与“已就绪”两级并按窗口前缀失效，只有 `_NET_WM_ICON`/`WM_CLASS` 变化才重建，`WM_NAME` 变化不再触发重绘，`StartupWMClass` 匹配不到时回退到启动器自带图标，消除启动瞬间的空白与闪烁；**全屏自动隐藏**，检测 `_NET_WM_STATE_FULLSCREEN` 后隐藏任务栏，指针贴近底边临时露出；**托盘与 Wi-Fi**，托盘图标在槽位内居中、状态区宽度与网络图标位置对齐，点击网络图标弹出原生 Wi-Fi 快捷面板（`nmcli` 异步扫描、Wi-Fi 开关、信号格与锁标识、点按连接、受保护网络进入密码模式），不再跳转到外部设置程序；**默认应用**，设置页扩展为 11 类，覆盖邮件、Office 文档与磁盘映像；**资源管理器侧栏**，快速访问改用 `QStandardPaths` 的 XDG 目录并在缺失时自动创建，`QListView` 补齐与 `QTreeView` 一致的选中配色；**桌面整洁**，磁盘分区不再作为桌面图标出现，图标点击不再因选中动画重启而闪烁，选择高亮改为与资源管理器一致的 `#CBE4F6` 浅色填充。
-
-当前版本已经在隔离 Xvfb 与 Openbox 会话中回归验证：开始菜单、登录页、连续壁纸切换、终端任务栏图标、任务栏多窗口清理、设置和资源管理器关键交互均通过实际截图或窗口属性检查。开始菜单回归额外验证了在菜单保持打开时新增 `.desktop` 条目会显示为新结果，并确认 Desktop Action 中故意错误的 `explorer.exe` 命令不会取代主应用启动命令。
+当前版本已经在隔离 Xvfb 与 Openbox 会话中回归验证：开始菜单、登录页、连续壁纸切换、终端任务栏图标、任务栏多窗口清理、设置和资源管理器关键交互均通过实际截图或窗口属性检查。开始菜单回归额外验证了在菜单保持打开时新增 `.desktop` 条目会显示为新结果，并确认 Desktop Action 中故意错误的 `explorer.exe` 命令不会取代主应用启动命令。3.6 的行为断言（`nmcli` 面板、触摸长按菜单、全屏自动隐藏、`.desktop` 本地化、README 文档关键词）由 CI 在解包后的二进制与 README 上强制校验。
 
 ## 快速构建与安装
 
 推荐使用 Debian、Ubuntu、Kali、Mint 或其他 apt 系发行版。构建脚本会构建 Shell、Qt/GTK 应用、资源管理器、SAS、RunBox 和包资源；若本地已有上游图标源，可传入其路径以离线刷新转换资源。
 
-持续集成（`.github/workflows/build-deb.yml`）会在 push、`v*` 标签、PR 和手动触发时自动执行 `build-deb.sh`，校验包内容、依赖解析，并在 Xvfb 下冒烟运行 Shell——日常开发无需本地构建。
+持续集成（`.github/workflows/build-deb.yml`）会在 push、`v*` 标签、PR 和手动触发时自动执行 `build-deb.sh`，校验包内容与行为断言、做依赖解析 dry run，并在 Xvfb 下冒烟运行 Shell——日常开发无需本地构建；推送 `v3.6` 这类标签时还会校验 `v<包版本>` 与标签一致并把 `.deb` 附加到 GitHub Release。
 
 ```sh
 sudo apt update
@@ -56,7 +65,7 @@ WINDOWSICONS_SOURCE=/path/to/WindowsIcons/Icons \
 FLUENT_SOURCE=/path/to/fluentui-system-icons/assets \
 ./build-deb.sh
 
-sudo apt install ./elevende_3.5.1_amd64.deb
+sudo apt install ./elevende_3.6_amd64.deb
 ```
 
 安装后可从显示管理器选择 ElevenDE 会话，或按下方教程配置开机直进；源码安装适用于开发环境：
@@ -134,7 +143,7 @@ startx /usr/local/bin/elevende-session
 
 ### 资源管理器与 Explorer-for-Linux 的关系
 
-资源管理器以 [macOS-Terminal/Explorer-for-Linux][explorer-upstream] 的 MIT 代码为基础；ElevenDE 并不将原始上游全部表述为自研代码。3.5.1 的本地重构主要位于 `src/explorer/filelist.cpp`、`main.cpp`、`mainwindow.cpp`、`style.cpp` 和 `thispc.cpp`，覆盖命令栏与路径栏布局、Windows 风格侧栏、图标解析、This PC 驱动器卡片以及单击选择/双击进入等交互。
+资源管理器以 [macOS-Terminal/Explorer-for-Linux][explorer-upstream] 的 MIT 代码为基础；ElevenDE 并不将原始上游全部表述为自研代码。3.5.1/3.6 的本地重构主要位于 `src/explorer/filelist.cpp`、`main.cpp`、`mainwindow.cpp`、`style.cpp` 和 `thispc.cpp`，覆盖命令栏与路径栏布局、Windows 风格侧栏、图标解析、This PC 驱动器卡片以及单击选择/双击进入等交互。
 
 > 这些修改的新增表达由 SYSTEM-Intel-MIC 以 GPL-3.0-or-later 发布；上游 MIT 版权与许可证同时适用于其原始部分。任何再发布者都必须同时保留 `LICENSES/Explorer-for-Linux-MIT.txt`、本仓库 `LICENSE` 和 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) 中的声明。
 
@@ -144,14 +153,14 @@ Microsoft Fluent System Icons 为 MIT 许可，项目保留其许可证副本并
 
 ## 发布与贡献
 
-每一个发布都应遵循相同流程：先在干净工作树中构建 `elevende_3.5.1_amd64.deb`，再提交源代码和文档，最后将生成的 DEB 附加到同一版本的 GitHub Release。请不要提交本地二进制、`build/`、临时截图、回归日志或 `*.deb`；这些内容已由 `.gitignore` 排除。
+每一个发布都应遵循相同流程：先在干净工作树中构建 `elevende_3.6_amd64.deb`，再提交源代码、[`CHANGELOG.md`](CHANGELOG.md) 更新日志与 README，最后打 `v<版本>` 标签——CI 校验 `v<包版本>` 与标签一致后自动把生成的 DEB 附加到同一版本的 GitHub Release。请不要提交本地二进制、`build/`、临时截图、回归日志或 `*.deb`；这些内容已由 `.gitignore` 排除。
 
 对 Shell、设置、资源管理器或资源文件的改动应保留可构建源码，并在提交前至少执行：
 
 ```sh
 git diff --check
 ./build-deb.sh
-dpkg-deb -I elevende_3.5.1_amd64.deb
+dpkg-deb -I elevende_3.6_amd64.deb
 git status --short
 ```
 

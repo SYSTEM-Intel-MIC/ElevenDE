@@ -1,5 +1,5 @@
 #!/bin/sh
-# ElevenDE 3.5.1 X11 session. Launch: startx /usr/local/bin/elevende-session
+# ElevenDE 3.6 X11 session. Launch: startx /usr/local/bin/elevende-session
 #
 # Paint a base background, run the native C/Xlib shell in the background,
 # then run Openbox. The session lasts exactly as long as Openbox; on exit

@@ -91,7 +91,7 @@ private:
     void onContextMenuFrom(QWidget *src, const QPoint &pos);
     void setSort(SortColumn column, Qt::SortOrder order);
     void updateStatus();
-    /* touch input (3.5.1): long-press = context menu, tap = select,
+    /* touch input (3.6): long-press = context menu, tap = select,
        double-tap = open, drag = scroll the list under the finger */
     bool handleTouchEvent(QObject *obj, class QTouchEvent *ev);
     void touchReset();

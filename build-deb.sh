@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-#  ElevenDE 3.5.1 deb builder
+#  ElevenDE 3.6 deb builder
 #
 #  Compiles every component (C shell, keybind engine, screenshot tool,
 #  Explorer file manager, SAS secure screen, RunBox, Qt app suite) and
-#  packages everything into elevende_3.5.1_amd64.deb.
+#  packages everything into elevende_3.6_amd64.deb.
 #
 #  Usage:
 #      ./build-deb.sh                 # build deps are auto-installed via apt
 #      sudo ./build-deb.sh            # if apt needs root
 #
-#  Output:  elevende_3.5.1_amd64.deb  (install with: sudo apt install ./xxx.deb)
+#  Output:  elevende_3.6_amd64.deb  (install with: sudo apt install ./xxx.deb)
 
 set -euo pipefail
 
@@ -19,7 +19,7 @@ if [ -z "${BASH_VERSION:-}" ]; then
 fi
 
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
-PKG_VERSION="3.5.1"
+PKG_VERSION="3.6"
 ARCH="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
 BUILD_DIR="${BUILD_DIR:-/tmp/elevende-deb-build}"
 PKG_ROOT="$BUILD_DIR/pkgroot"

@@ -3,7 +3,7 @@ Type=Application
 Name=照片
 Name[en]=Photos
 Comment=Open images with the system default photo viewer
-# elevende-photos is gone in 3.5.1: tools/elevende-open-photo resolves the
+# elevende-photos is gone in 3.6: tools/elevende-open-photo resolves the
 # system default handler for image/png (xdg-mime + gtk-launch) and falls back
 # to the common Debian viewers. No MimeType= key on purpose, so this entry
 # can never become the default image handler itself (that would recurse).

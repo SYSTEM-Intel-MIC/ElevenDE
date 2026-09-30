@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#  ElevenDE 3.5.1 installer (Windows 11 style X11 desktop environment)
+#  ElevenDE 3.6 installer (Windows 11 style X11 desktop environment)
 #
 #  Components built & installed:
 #    - elevende-shell / elevende-lock / elevende-notifyd   (C/Xlib core shell)
@@ -290,7 +290,7 @@ if [ -n "$LOGIN_USER" ]; then
             cp "$SRC_DIR/assets/mimeapps.list" "$UHOME/.config/mimeapps.list"
             chown "$LOGIN_USER":"$(id -gn "$LOGIN_USER")" "$UHOME/.config/mimeapps.list" 2>/dev/null || true
         elif grep -q "elevende-photos" "$UHOME/.config/mimeapps.list" 2>/dev/null; then
-            # Upgrade migration: elevende-photos was removed in 3.5.1. Strip
+            # Upgrade migration: elevende-photos was removed in 3.6. Strip
             # the stale entries so image/* falls through to the system default
             # viewer instead of pointing at a desktop file that no longer
             # exists (leaving the rest of the user's file untouched).
@@ -421,7 +421,7 @@ rm -f /usr/share/wayland-sessions/elevende.desktop 2>/dev/null || true
 
 log "done."
 echo
-echo "ElevenDE 3.5.1 installed. Reboot: it boots to a console, auto-logs-in"
+echo "ElevenDE 3.6 installed. Reboot: it boots to a console, auto-logs-in"
 echo "as '$LOGIN_USER' and starts the desktop via startx."
 echo
 echo "  Windows shortcuts (manage them in Settings -> 快捷键, Win+I):"

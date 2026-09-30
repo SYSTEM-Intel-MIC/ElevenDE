@@ -1,5 +1,5 @@
 #!/bin/sh
-# ElevenDE "Photos" launcher (3.5.1).
+# ElevenDE "Photos" launcher (3.6).
 #
 # The bundled elevende-photos application was removed; the start-menu entry
 # now maps to the SYSTEM default photo viewer. Invoked from photos.desktop

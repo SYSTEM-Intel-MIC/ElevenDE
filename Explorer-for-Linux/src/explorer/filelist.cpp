@@ -258,7 +258,7 @@ static QIcon packagedFileIcon(const QFileInfo &fi)
     return packagedIcon(QStringLiteral("text-x-generic"), QStringLiteral("mimetypes"));
 }
 
-/* --- drop INTO Explorer (3.5.1) ------------------------------------------
+/* --- drop INTO Explorer (3.6) ------------------------------------------
  * Recursive copy used by drops: QFile::copy only handles plain files, and a
  * dropped folder must arrive with its whole tree.  Symlinks are skipped on
  * purpose -- following them can loop forever. */
@@ -333,7 +333,7 @@ public:
         return QFileSystemModel::data(index, role);
     }
 
-    /* --- drag source (3.5.1): files can be dragged OUT of Explorer ---------
+    /* --- drag source (3.6): files can be dragged OUT of Explorer ---------
      * Qt turns a view drag into an XDND drag on X11, so anything drop-capable
      * (the ElevenDE desktop shell, other file managers, browsers, editors)
      * receives the selection as text/uri-list. The mime payload is built here
@@ -356,7 +356,7 @@ public:
         return f;
     }
 
-    /* --- drop INTO Explorer (3.5.1): drag files between two Explorer
+    /* --- drop INTO Explorer (3.6): drag files between two Explorer
      * windows, or from the desktop shell / any XDND source into Explorer.
      * QFileSystemModel::dropMimeData refuses to work while the model is
      * read-only, so drops are handled here instead of toggling read-only.
@@ -552,7 +552,7 @@ FileList::FileList(QWidget *parent)
     m_treeView->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_treeView->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_treeView->setAlternatingRowColors(false);
-    m_treeView->setAnimated(true);   /* expand/collapse glide (3.5.1) */
+    m_treeView->setAnimated(true);   /* expand/collapse glide (3.6) */
     m_treeView->setSortingEnabled(true);
     QHeaderView *h = m_treeView->header();
     h->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
@@ -567,7 +567,7 @@ FileList::FileList(QWidget *parent)
     m_proxy->setSourceModel(m_model);
     m_proxy->sort(SortName, Qt::AscendingOrder);
 
-    /* Drag & drop both ways (3.5.1). DragDrop = views are drag sources AND
+    /* Drag & drop both ways (3.6). DragDrop = views are drag sources AND
      * drop targets: XDND carries the selection out to the desktop shell or
      * any other drop-aware program, and files dragged from another Explorer
      * window (or any XDND source) land in the folder under the cursor as
@@ -626,7 +626,7 @@ FileList::FileList(QWidget *parent)
                         (QObject *)m_treeView, (QObject *)m_treeView->viewport() })
         o->installEventFilter(this);
 
-    /* Touch input (3.5.1): the file list must respond like Windows 11
+    /* Touch input (3.6): the file list must respond like Windows 11
      * Explorer on a tablet -- tap selects, double-tap opens, holding still
      * for half a second opens the context menu and dragging scrolls the list
      * under the finger instead of starting a drag-and-drop.  Viewport-level

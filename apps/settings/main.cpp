@@ -389,7 +389,7 @@ QWidget *buildAboutPage()
                                QStringLiteral("内核"), QStringLiteral("桌面环境") };
     const QStringList vals = { cpuModel(), totalRam(), rootDiskSize(),
                                osReleaseValue(QStringLiteral("PRETTY_NAME")),
-                               kernelVersion(), QStringLiteral("ElevenDE 3.5.1 (X11)") };
+                               kernelVersion(), QStringLiteral("ElevenDE 3.6 (X11)") };
     for (int i = 0; i < keys.size(); ++i) {
         auto *k = new QLabel(keys.at(i) + QStringLiteral("："), spec);
         k->setProperty("subtle", true);
@@ -406,7 +406,7 @@ QWidget *buildAboutPage()
                               "ElevenDE 是一个 Windows 11 风格的开源 Linux 桌面环境，\n"
                               "基于自研 C/Xlib Shell + Openbox 窗口管理器。\n"
                               "GNU General Public License v3.0 or later.")),
-                          QStringLiteral("版本 3.5.1")));
+                          QStringLiteral("版本 3.6")));
     v->addStretch(1);
     return scrollOf(page);
 }
