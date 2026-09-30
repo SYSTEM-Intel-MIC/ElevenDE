@@ -19,9 +19,8 @@ add_executable(elevende-notepad notepad/main.cpp)
 add_executable(elevende-calc calculator/main.cpp)
 add_executable(elevende-taskmgr taskmgr/main.cpp)
 add_executable(elevende-settings settings/main.cpp settings/extra.cpp)
-add_executable(elevende-photos photos/main.cpp)
 
-foreach(app elevende-notepad elevende-calc elevende-taskmgr elevende-settings elevende-photos)
+foreach(app elevende-notepad elevende-calc elevende-taskmgr elevende-settings)
     target_link_libraries(${app} PRIVATE Qt6::Widgets Qt6::Network)
     target_include_directories(${app} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/common)
 endforeach()
@@ -33,5 +32,5 @@ if(X11_FOUND)
     target_compile_definitions(elevende-settings PRIVATE ELEVENDE_HAVE_X11=1)
 endif()
 
-install(TARGETS elevende-notepad elevende-calc elevende-taskmgr elevende-settings elevende-photos
+install(TARGETS elevende-notepad elevende-calc elevende-taskmgr elevende-settings
         RUNTIME DESTINATION bin)

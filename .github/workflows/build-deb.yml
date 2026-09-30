@@ -1,0 +1,181 @@
+name: build-deb
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-deb-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Build elevende DEB (Ubuntu 24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write   # release step uploads the .deb to a GitHub Release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config git dpkg-dev \
+            libx11-dev libxft-dev libfontconfig1-dev libfreetype-dev libpng-dev \
+            libxtst-dev libxi-dev libdbus-1-dev libcrypt-dev libgtk-3-dev \
+            qt6-base-dev qt6-svg-dev qt6-tools-dev libgl1-mesa-dev \
+            libgdk-pixbuf-2.0-dev librsvg2-bin python3 python3-pil \
+            libxcb1-dev libxcb-keysyms1-dev \
+            xvfb xauth fonts-dejavu-core
+
+      # build-deb.sh auto-installs anything still missing, then compiles the
+      # C/Xlib shell, keybind + screenshot tools, Explorer, SAS, RunBox and the
+      # Qt app suite, and packages everything into elevende_3.5.1_amd64.deb.
+      - name: Build .deb
+        run: ./build-deb.sh
+
+      # build-deb.sh skips a failed component with a WARN instead of failing,
+      # so assert the expected payload is really inside the package, including
+      # the setuid bit on elevende-lock (it reads /etc/shadow at login).
+      - name: Verify package contents
+        run: |
+          set -euo pipefail
+          DEB=elevende_3.5.1_amd64.deb
+          test -f "$DEB"
+          echo "::group::dpkg-deb -I"
+          dpkg-deb -I "$DEB"
+          echo "::endgroup::"
+          LIST="$(dpkg-deb -c "$DEB")"
+          missing=0
+          for f in \
+              usr/local/bin/elevende-shell \
+              usr/local/bin/elevende-lock \
+              usr/local/bin/elevende-notifyd \
+              usr/local/bin/elevende-keybind \
+              usr/local/bin/elevende-screenshot \
+              usr/local/bin/elevende-session \
+              usr/local/bin/elevende-setup-autologin \
+              usr/local/bin/explorer.exe \
+              usr/local/bin/sas-screen \
+              usr/local/bin/runbox \
+              usr/local/bin/elevende-notepad \
+              usr/local/bin/elevende-calc \
+              usr/local/bin/elevende-taskmgr \
+              usr/local/bin/elevende-settings \
+              usr/local/bin/elevende-open-photo \
+              usr/local/share/applications/photos.desktop \
+              usr/local/share/elevende-shell/picom-anim.conf \
+              usr/share/xsessions/elevende.desktop \
+              usr/share/themes/ElevenDE/openbox-3/themerc; do
+            if ! grep -q "\./$f\$" <<<"$LIST"; then
+              echo "::error::missing from package: $f"
+              missing=1
+            fi
+          done
+          # 3.5.1 removed the bundled Photos app: the menu entry must stay
+          # (it maps to the system default viewer) but the binary must not.
+          if grep -q "\./usr/local/bin/elevende-photos\$" <<<"$LIST"; then
+            echo "::error::elevende-photos binary should have been removed"
+            missing=1
+          fi
+          if ! grep -qE '^-rwsr-xr-x .* \./usr/local/bin/elevende-lock$' <<<"$LIST"; then
+            echo "::error::elevende-lock lost its setuid bit"
+            missing=1
+          fi
+          [ "$missing" -eq 0 ]
+          echo "package content check passed"
+
+      # Guard the 3.5.1 behaviour set: the source-level features below must
+      # survive into the shipped binary, and the README must document them.
+      - name: Check 3.5.1 behaviour assertions
+        run: |
+          set -euo pipefail
+          dpkg-deb -x elevende_3.5.1_amd64.deb /tmp/elevende-root
+          SHELL_BIN=/tmp/elevende-root/usr/local/bin/elevende-shell
+          fail=0
+          # native Wi-Fi quick settings (replaces `sas-screen --network`)
+          if ! grep -aq "nmcli" "$SHELL_BIN"; then
+            echo "::error::shell is missing the native Wi-Fi panel (nmcli)"
+            fail=1
+          fi
+          # touch long-press -> context menu (the shell draws these labels)
+          if ! grep -aq "固定到开始菜单" "$SHELL_BIN"; then
+            echo "::error::start-menu long-press context menu is missing"
+            fail=1
+          fi
+          # fullscreen auto-hide taskbar reads _NET_WM_STATE_FULLSCREEN
+          if ! grep -aq "_NET_WM_STATE_FULLSCREEN" "$SHELL_BIN"; then
+            echo "::error::fullscreen auto-hide taskbar is missing"
+            fail=1
+          fi
+          # .desktop localisation + icon path handling
+          if ! grep -aq "LC_MESSAGES" "$SHELL_BIN"; then
+            echo "::error::.desktop locale resolution is missing"
+            fail=1
+          fi
+          # default-apps page must ship the extended MIME categories
+          grep -q "默认应用覆盖网页" README.md || {
+            echo "::error::README does not document the extended default-apps list"; fail=1; }
+          grep -q "触摸与手势" README.md || {
+            echo "::error::README does not document touch gestures"; fail=1; }
+          grep -q "原生 Wi-Fi 快捷面板" README.md || {
+            echo "::error::README does not document the Wi-Fi panel"; fail=1; }
+          grep -q "默认应用" README.md || {
+            echo "::error::README does not document default apps"; fail=1; }
+          [ "$fail" -eq 0 ]
+          echo "3.5.1 behaviour assertions passed"
+
+      # Dry run only: proves the Depends field resolves on a clean runner
+      # without downloading the full X11/openbox runtime stack.
+      - name: Check dependency resolution
+        run: sudo apt-get install -s --no-install-recommends ./elevende_3.5.1_amd64.deb
+
+      - name: Smoke test shell under Xvfb
+        run: |
+          set -euo pipefail
+          dpkg-deb -x elevende_3.5.1_amd64.deb /tmp/elevende-root
+          sudo cp -a /tmp/elevende-root/usr/local/. /usr/local/
+          rc=0
+          timeout 8 xvfb-run -a elevende-shell >/tmp/shell-smoke.log 2>&1 || rc=$?
+          cat /tmp/shell-smoke.log
+          # 124 = timeout killed a shell that was still running (success).
+          # Any other code means the shell exited on its own during startup.
+          if [ "$rc" -ne 124 ]; then
+            echo "::error::elevende-shell exited early (rc=$rc)"
+            exit 1
+          fi
+          echo "shell stayed up for 8s under Xvfb"
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: elevende-deb
+          path: elevende_*.deb
+          if-no-files-found: error
+          retention-days: 14
+
+      # Release flow per README: the .deb is never committed, it is attached
+      # to the same-version GitHub Release so every release maps to a commit.
+      - name: Attach .deb to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          DEB_VER="$(dpkg-deb -f elevende_3.5.1_amd64.deb Version)"
+          if [ "v$DEB_VER" != "$TAG" ]; then
+            echo "::error::tag $TAG does not match package version $DEB_VER"
+            exit 1
+          fi
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" --generate-notes
+          gh release upload "$TAG" elevende_3.5.1_amd64.deb \
+            --repo "$GITHUB_REPOSITORY" --clobber

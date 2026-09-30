@@ -78,7 +78,7 @@ int main(int argc, char **argv)
 
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("explorer.exe"));
-    app.setApplicationDisplayName(QStringLiteral("Lindows 资源管理器"));
+    app.setApplicationDisplayName(QStringLiteral("资源管理器"));
 
     const QString theme = pickIconTheme();
     if (!theme.isEmpty())

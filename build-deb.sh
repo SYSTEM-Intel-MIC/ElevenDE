@@ -38,14 +38,15 @@ die()  { echo -e "\033[1;31mERROR:\033[0m $*" >&2; exit 1; }
 if [ -f /etc/os-release ]; then . /etc/os-release; ID="${ID:-linux}"; else ID=linux; fi
 VERSION="$PKG_VERSION"
 
-pkg_install() {   # tolerant installer, one group at a time
+pkg_install() {   # tolerant installer, one group at a time (uses $SUDO: without
+                 # it every non-root run silently skipped this whole group)
     case "$ID" in
         debian|ubuntu|kali|linuxmint|pop|raspbian)
-            apt-get install -y --no-install-recommends "$@" || warn "apt failed for: $*" ;;
+            $SUDO apt-get install -y --no-install-recommends "$@" || warn "apt failed for: $*" ;;
         fedora|rhel|centos|rocky|almalinux)
-            dnf install -y "$@" || warn "dnf failed for: $*" ;;
+            $SUDO dnf install -y "$@" || warn "dnf failed for: $*" ;;
         arch|manjaro)
-            pacman -S --needed --noconfirm "$@" || warn "pacman failed for: $*" ;;
+            $SUDO pacman -S --needed --noconfirm "$@" || warn "pacman failed for: $*" ;;
         *) warn "unknown distro; install manually: $*" ;;
     esac
 }
@@ -194,7 +195,7 @@ install -m755 "$BUILD_DIR/explorer/bin/explorer.exe" "$PKG_ROOT$BIN/explorer.exe
 [ "$SAS_OK" = 1 ]    && [ -x "$BUILD_DIR/sas/sas-screen" ] && install -m755 "$BUILD_DIR/sas/sas-screen" "$PKG_ROOT$BIN/sas-screen"
 [ "$RUNBOX_OK" = 1 ] && [ -x "$SRC_DIR/runbox-linux/runbox" ] && install -m755 "$SRC_DIR/runbox-linux/runbox" "$PKG_ROOT$BIN/runbox"
 if [ "$APPS_OK" = 1 ]; then
-    for app in elevende-notepad elevende-calc elevende-taskmgr elevende-settings elevende-photos; do
+    for app in elevende-notepad elevende-calc elevende-taskmgr elevende-settings; do
         [ -x "$BUILD_DIR/apps/$app" ] && install -m755 "$BUILD_DIR/apps/$app" "$PKG_ROOT$BIN/$app"
     done
 fi
@@ -207,6 +208,8 @@ install -Dm644 wm/sas-config.json "$PKG_ROOT$SHARE/sas-config.json"
 install -Dm644 wm/menu.xml        "$PKG_ROOT$SHARE/menu.xml"
 install -Dm644 wm/picom.conf      "$PKG_ROOT$SHARE/picom.conf"
 install -Dm644 wm/picom-mica.conf "$PKG_ROOT$SHARE/picom-mica.conf"
+# animation snippet: appended at runtime by elevende-session on picom >= 12
+install -Dm644 wm/picom-anim.conf "$PKG_ROOT$SHARE/picom-anim.conf"
 install -Dm644 assets/material/mica-noise.png "$PKG_ROOT$SHARE/material/mica-noise.png"
 # Openbox searches the system theme directory on Debian; installing under
 # /usr/local/share/themes is not reliable and silently falls back to a blue
@@ -281,14 +284,16 @@ fi
 mkdir -p "$PKG_ROOT$SHARE/wallpapers"
 if ls assets/wallpapers/*.png >/dev/null 2>&1; then
     install -m644 assets/wallpapers/*.png "$PKG_ROOT$SHARE/wallpapers/"
-    # The third supplied wallpaper is the Lindows light default.
-    if [ -f assets/wallpapers/wallpaper-lindows-light.png ]; then
-        install -m644 assets/wallpapers/wallpaper-lindows-light.png "$PKG_ROOT$SHARE/wallpaper.png"
+    # System-wide default wallpaper (shell + lock screen fallback).
+    if [ -f assets/wallpapers/wallpaper-bloom-blue.png ]; then
+        install -m644 assets/wallpapers/wallpaper-bloom-blue.png "$PKG_ROOT$SHARE/wallpaper.png"
     fi
 fi
 
 # autologin helper (opt-in; see postinst message)
 install -Dm755 tools/elevende-setup-autologin "$PKG_ROOT$BIN/elevende-setup-autologin"
+# helper for the photos.desktop menu entry (no bundled viewer anymore)
+install -Dm755 tools/elevende-open-photo "$PKG_ROOT$BIN/elevende-open-photo"
 
 # open-source build material: ship the exact scripts and documentation used to
 # produce this binary package, so an installed DEB remains auditable/rebuildable.
@@ -326,7 +331,7 @@ fi
 # non-library runtime dependencies (X stack, WM, fonts, MIME database...)
 # NetworkManager supplies nmcli for the taskbar WLAN panel. iwd is accepted
 # as an alternative backend by sas-screen on installations that use it.
-extra_deps="xorg, xinit, openbox, picom, xterm, dbus-x11, x11-xserver-utils, x11-utils, alsa-utils, network-manager | iwd, shared-mime-info, adwaita-icon-theme, hicolor-icon-theme, fonts-dejavu-core, fonts-noto-cjk, fonts-noto-color-emoji, librsvg2-common, libxtst6, libxi6, policykit-1 | polkitd"
+extra_deps="xorg, xinit, openbox, picom, xterm, dbus-x11, x11-xserver-utils, x11-utils, xdg-utils, alsa-utils, network-manager | iwd, shared-mime-info, adwaita-icon-theme, hicolor-icon-theme, fonts-dejavu-core, fonts-noto-cjk, fonts-noto-color-emoji, librsvg2-common, libxtst6, libxi6, policykit-1 | polkitd"
 if [ -n "$shlibs_depends" ]; then
     DEPENDS="$shlibs_depends, $extra_deps"
 else
@@ -348,7 +353,8 @@ Description: Windows 11 style desktop environment for Linux
  screen), Openbox window manager with a Win11 dark theme, a Qt6 file
  manager (Explorer), SAS secure attention screen (Ctrl+Alt+Del), RunBox
  (Win+R), and a suite of Win11 styled apps (settings, notepad, task
- manager, calculator, photos).
+ manager, calculator). Image files open with the system default photo
+ viewer; the "Photos" menu entry launches it too.
 EOF
 
 cat > "$PKG_ROOT/DEBIAN/postinst" <<'EOF'

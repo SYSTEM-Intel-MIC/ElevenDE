@@ -248,6 +248,13 @@ elif command -v python3 >/dev/null 2>&1; then
     ( cd "$SRC_DIR/assets" && python3 gen_wallpapers.py ) || warn "wallpaper generation failed"
     install -m644 "$SRC_DIR"/assets/wallpapers/*.png "$SHARE/wallpapers/" 2>/dev/null || true
 fi
+# System-wide default wallpaper (parity with build-deb.sh): the shell and the
+# lock screen fall back to $SHARE/wallpaper.png when no user wallpaper exists.
+if [ -f "$SRC_DIR/assets/wallpapers/wallpaper-bloom-blue.png" ]; then
+    install -m644 "$SRC_DIR/assets/wallpapers/wallpaper-bloom-blue.png" "$SHARE/wallpaper.png"
+fi
+# Retire the old default from previous source installs.
+rm -f "$SHARE/wallpapers/wallpaper-lindows-light.png"
 
 # ---- Win11 icon set ---------------------------------------------------------
 log "installing the Win11 icon set"
@@ -282,6 +289,13 @@ if [ -n "$LOGIN_USER" ]; then
         if [ ! -f "$UHOME/.config/mimeapps.list" ]; then
             cp "$SRC_DIR/assets/mimeapps.list" "$UHOME/.config/mimeapps.list"
             chown "$LOGIN_USER":"$(id -gn "$LOGIN_USER")" "$UHOME/.config/mimeapps.list" 2>/dev/null || true
+        elif grep -q "elevende-photos" "$UHOME/.config/mimeapps.list" 2>/dev/null; then
+            # Upgrade migration: elevende-photos was removed in 3.5.1. Strip
+            # the stale entries so image/* falls through to the system default
+            # viewer instead of pointing at a desktop file that no longer
+            # exists (leaving the rest of the user's file untouched).
+            sed -i 's/elevende-photos\.desktop;//g' "$UHOME/.config/mimeapps.list"
+            chown "$LOGIN_USER":"$(id -gn "$LOGIN_USER")" "$UHOME/.config/mimeapps.list" 2>/dev/null || true
         fi
     fi
 fi
@@ -310,7 +324,7 @@ fi
 
 # Qt apps
 if [ "$APPS_OK" = 1 ]; then
-    for app in elevende-notepad elevende-calc elevende-taskmgr elevende-settings elevende-photos; do
+    for app in elevende-notepad elevende-calc elevende-taskmgr elevende-settings; do
         [ -x "$BUILD_DIR/apps/$app" ] && install -m755 "$BUILD_DIR/apps/$app" "$BIN/$app"
     done
 fi
@@ -323,6 +337,8 @@ install -Dm644 "$SRC_DIR/wm/sas-config.json" "$SHARE/sas-config.json"
 install -Dm644 "$SRC_DIR/wm/menu.xml"        "$SHARE/menu.xml"
 install -Dm644 "$SRC_DIR/wm/picom.conf"      "$SHARE/picom.conf"
 install -Dm644 "$SRC_DIR/wm/picom-mica.conf" "$SHARE/picom-mica.conf"
+# animation snippet: appended at runtime by elevende-session on picom >= 12
+install -Dm644 "$SRC_DIR/wm/picom-anim.conf" "$SHARE/picom-anim.conf"
 install -Dm644 "$SRC_DIR/assets/material/mica-noise.png" "$SHARE/material/mica-noise.png"
 # Debian Openbox searches /usr/share/themes; using only /usr/local/share
 # causes a silent fallback to the stock blue decoration.
@@ -331,8 +347,12 @@ install -m644 "$SRC_DIR"/wm/ElevenDE/openbox-3/* "/usr/share/themes/ElevenDE/ope
 
 # session entry
 install -Dm755 "$SRC_DIR/session/elevende-session" "$BIN/elevende-session"
+# helper for the photos.desktop menu entry (no bundled viewer anymore)
+install -Dm755 "$SRC_DIR/tools/elevende-open-photo" "$BIN/elevende-open-photo"
 install -Dm644 "$SRC_DIR/assets/xresources.elevende" /etc/X11/Xresources.d/elevende
 install -Dm644 "$SRC_DIR/assets/elevende.desktop" /usr/share/xsessions/elevende.desktop
+# boot-straight-into-ElevenDE helper (README "启动 ElevenDE 并设为默认桌面")
+install -Dm755 "$SRC_DIR/tools/elevende-setup-autologin" "$BIN/elevende-setup-autologin"
 
 # Upgrade migration: stale per-user rc.xml files preserve the pre-3.4.2 mouse
 # bindings. Remove only files without the revision marker; the next session

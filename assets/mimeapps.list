@@ -18,15 +18,17 @@ application/json=elevende-notepad.desktop;
 application/xml=elevende-notepad.desktop;
 application/x-wine-extension-ini=elevende-notepad.desktop;
 
-# --- images -> ElevenDE Photos ---
-image/png=elevende-photos.desktop;org.gnome.eog.desktop;
-image/jpeg=elevende-photos.desktop;org.gnome.eog.desktop;
-image/bmp=elevende-photos.desktop;org.gnome.eog.desktop;
-image/gif=elevende-photos.desktop;org.gnome.eog.desktop;
-image/webp=elevende-photos.desktop;org.gnome.eog.desktop;
-image/svg+xml=elevende-photos.desktop;org.gnome.eog.desktop;
-image/tiff=elevende-photos.desktop;org.gnome.eog.desktop;
-image/vnd.microsoft.icon=elevende-photos.desktop;
+# --- images -> the system default photo viewer (ElevenDE ships no viewer) --
+# Ordered fallback chain: the first installed viewer wins, so eog/Loupe/
+# xviewer/gpicview (whatever the distro defaults to) handles photos.
+image/png=org.gnome.eog.desktop;org.gnome.Loupe.desktop;eom.desktop;xviewer.desktop;gpicview.desktop;ristretto.desktop;
+image/jpeg=org.gnome.eog.desktop;org.gnome.Loupe.desktop;eom.desktop;xviewer.desktop;gpicview.desktop;ristretto.desktop;
+image/bmp=org.gnome.eog.desktop;org.gnome.Loupe.desktop;eom.desktop;xviewer.desktop;gpicview.desktop;ristretto.desktop;
+image/gif=org.gnome.eog.desktop;org.gnome.Loupe.desktop;eom.desktop;xviewer.desktop;gpicview.desktop;ristretto.desktop;
+image/webp=org.gnome.eog.desktop;org.gnome.Loupe.desktop;eom.desktop;xviewer.desktop;gpicview.desktop;ristretto.desktop;
+image/svg+xml=org.gnome.eog.desktop;org.gnome.Loupe.desktop;eom.desktop;xviewer.desktop;gpicview.desktop;ristretto.desktop;
+image/tiff=org.gnome.eog.desktop;org.gnome.Loupe.desktop;eom.desktop;xviewer.desktop;gpicview.desktop;ristretto.desktop;
+image/vnd.microsoft.icon=org.gnome.eog.desktop;org.gnome.Loupe.desktop;eom.desktop;xviewer.desktop;gpicview.desktop;ristretto.desktop;
 
 # --- archives -> archive manager (NOT the file manager) ---
 application/zip=org.gnome.FileRoller.desktop;org.kde.ark.desktop;xarchiver.desktop;

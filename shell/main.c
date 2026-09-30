@@ -28,6 +28,7 @@
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #endif
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/select.h>
 #include <sys/stat.h>
 #include <signal.h>
@@ -54,6 +55,9 @@
 #define ICON_GY   24
 #define ICON_CSX  (ICON_W + 14)
 #define ICON_CSY  (ICON_H + 10)
+/* Pointer movement (manhattan, px) before a press becomes a drag -- the same
+ * idea as Qt's startDragDistance behind the Explorer icon view. */
+#define DRAG_THRESHOLD 6
 #define MAX_TASKS 96
 #define MAX_ICONS 96
 #define MAX_HOT   96
@@ -96,6 +100,8 @@ static char  im_label[8] = "ENG";      /* taskbar input-method indicator */
 static int   im_ngroups = 1;
 static Window win_vol = 0;                /* volume flyout               */
 static int    vol_visible = 0, vol_hover = 0, vol_drag = 0;
+static Window win_net = 0;                /* Wi-Fi quick-settings flyout */
+static int    net_visible = 0;
 
 /* system tray state (refreshed every 2 s) */
 static int vol_level = 50, vol_muted = 0;
@@ -119,7 +125,9 @@ static int super_down = 0;   /* Super physically held right now */
 static int super_combo = 0;  /* another key was pressed during the hold */
 static int    bar_pill_hover = -1;
 
-typedef struct { int x, y; char label[64]; char path[512]; int is_dir; } Icon;
+/* icon[]: freedesktop Icon= value read from a *.desktop entry on the Desktop
+ * ("" = derive from the file name as before). */
+typedef struct { int x, y; char label[64]; char path[512]; int is_dir; char icon[64]; } Icon;
 static Icon ic[MAX_ICONS];
 static int  nic = 0;
 
@@ -145,12 +153,39 @@ static int desk_dirty = 0;
 /* desktop icon drag state */
 static int press_active = 0;
 static int press_icon = -1;
+/* --- touch-friendly gesture state (deferred activation + long-press) -----
+ * A Button1 press records its target and activates ON RELEASE, so a touch
+ * tap works like a mouse click.  Holding still for ~500 ms fires the same
+ * context menu as a right-click, and moving past DRAG_THRESHOLD turns the
+ * press into a drag (desktop icon drag / Start-menu list scroll) instead. */
+#define GP_NONE       0
+#define GP_MENU_ROW   1   /* Start-menu result row        */
+#define GP_MENU_TILE  2   /* pinned tile                  */
+#define GP_SEARCH_ROW 3   /* search popup result row      */
+#define GP_TASK       4   /* taskbar button               */
+#define GP_DESK       5   /* desktop icon / empty space   */
+static int    gp_kind = GP_NONE;
+static Window gp_win = None;
+static int    gp_idx = -1;
+static int    gp_x = 0, gp_y = 0;          /* press point (window coords) */
+static int    gp_scroll = 0;               /* apps_scroll at press time   */
+static double gp_t0 = 0;
+static int    gp_drag = 0;                 /* moved past the threshold    */
+static int    gp_lp = 0;                   /* long-press menu already out */
 static int press_x0 = 0, press_y0 = 0;
 static int ic_orig_x = 0, ic_orig_y = 0;
 static int sel_icon = -1;               /* last single-selected desktop icon */
 static int hover_icon = -1;             /* desktop icon under the pointer */
 static float sel_anim = 1.0f;           /* 0..1 selection-box scale progress */
 static int   sel_anim_act = 0;          /* selection animation still running */
+static int dragging_icon = 0;           /* past threshold: icon floats */
+static int drag_gx = 0, drag_gy = 0;    /* floating position (follows cursor) */
+static int drag_tx = 0, drag_ty = 0;    /* landing cell top-left */
+static int drag_occupant = -1;          /* icon already living in that cell */
+static int settle_icon = -1;            /* icon gliding into place */
+static int settle_fx = 0, settle_fy = 0;/* glide start position */
+static float settle_t = 1.0f;           /* 0..1 glide progress */
+static int   settle_act = 0;            /* glide still running */
 
 /* app search ------------------------------------------------------------ */
 #define NAPP 512
@@ -173,7 +208,7 @@ static int sel_row = -1;
 static int menu_hover_row = -1;
 static RRect list_r;
 static int  list_vis = 0;
-static Color cc_sel, cc_hoverc;
+static Color cc_sel, cc_hoverc, cc_track;
 static Pixmap wall_pm = None;
 static int   wall_ok = 0;
 
@@ -288,6 +323,7 @@ static int    refresh_tasks(void);
 static Pixmap icon_for_png(const char *name, int size, const Color *bg);
 static Pixmap icon_for_exact(const char *name, int size, const Color *bg);
 static Pixmap icon_for_task(Window w, int size);
+static const char *desktop_icon_for_class(const char *cls);
 static void   icache_clear(void);
 static void   win_class(Window w, char *buf, int nbuf);
 static const char *app_icon_name(const char *cls);
@@ -362,6 +398,13 @@ static void   search_hide(void);
 static void   draw_search(void);
 static void   handle_search_press(int x, int y);
 static void   handle_search_key(const XKeyEvent *ev);
+static void   net_show(void);
+static void   net_hide(void);
+static void   draw_net(void);
+static void   net_poll(void);
+static void   net_place(void);
+static void   gp_reset(void);
+static void   power_hide(void);
 
 /* ------------------------------------------------------------------ utils */
 static double now_sec(void) {
@@ -417,8 +460,9 @@ static Window mk_owindow(int x, int y, int w, int h) {
     sa.override_redirect = True;
     sa.background_pixel = cc_bar.pixel;
     sa.backing_store = Always;     /* server repaints hidden parts -> no tear */
-    sa.event_mask = ExposureMask | ButtonPressMask | KeyPressMask |
-                    PointerMotionMask | EnterWindowMask | LeaveWindowMask;
+    sa.event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask |
+                    KeyPressMask | PointerMotionMask | EnterWindowMask |
+                    LeaveWindowMask;
     Window win = XCreateWindow(dpy, root, x, y, w, h, 0, CopyFromParent,
                                InputOutput, CopyFromParent,
                                CWOverrideRedirect | CWBackPixel |
@@ -990,7 +1034,8 @@ static int pointer_over_own_ui(void) {
         return 1;                            /* assume ours: don't close */
     return kid == win_bar || kid == win_desk || kid == win_menu ||
            kid == win_power || kid == win_pinm || kid == win_ctx ||
-           kid == win_search || kid == win_cal || kid == win_vol;
+           kid == win_search || kid == win_cal || kid == win_vol ||
+           kid == win_net;
 }
 
 static void __attribute__((unused)) wm_break_stuck(void) {
@@ -1199,22 +1244,26 @@ static int refresh_tasks(void) {
     for (int i = 0; i < ntask; i++)
         tasks[i].active = (tasks[i].win == g_active);
 
-    int changed = (ntask != last_ntask || g_active != last_active);
-    if (!changed)
+    int set_changed = (ntask != last_ntask);
+    if (!set_changed)
         for (int i = 0; i < ntask && i < last_ntask; i++)
-            if (tasks[i].win != last_wins[i]) { changed = 1; break; }
+            if (tasks[i].win != last_wins[i]) { set_changed = 1; break; }
+    int act_changed = (g_active != last_active);
     static int first = 1;
-    if (changed || first) {
+    if (set_changed || first) {
         /* Client windows can reuse XIDs after a close. Drop all task Pixmaps
-           whenever the client set changes so a relaunch cannot inherit an old
-           transparent or stale image. */
+           when the client SET changes so a relaunch cannot inherit an old
+           transparent or stale image.
+           Focus switches (g_active) must NOT wipe the cache: that freed and
+           re-decoded every icon on each alt-tab, which showed up as taskbar
+           icon flicker / momentarily blank buttons. */
         icache_clear();
         first = 0;
         last_ntask = ntask;
-        last_active = g_active;
         for (int i = 0; i < ntask; i++) last_wins[i] = tasks[i].win;
     }
-    return changed;
+    if (act_changed) last_active = g_active;
+    return set_changed || act_changed;
 }
 
 /* ------------------------------------------------------------------ icons */
@@ -1741,8 +1790,29 @@ static void wallpaper_init(void) {
 
 static const char *theme_find(const char *name, int size) {
     static char buf[512];
+    static char norm[256];
     static const char *cats[] = { "apps", "places", "devices", "mimetypes" };
     static const char *exts[] = { ".png", ".svg" };
+    if (!name || !name[0]) return NULL;
+    /* Icon=/path/to/icon.png (absolute path inside a .desktop entry) */
+    if (name[0] == '/') {
+        if (access(name, R_OK) == 0) { snprintf(buf, sizeof buf, "%s", name); return buf; }
+        return NULL;
+    }
+    /* Icon=firefox.png: strip the image extension so the themed lookup runs
+       on the bare name instead of searching for "firefox.png.png". */
+    {
+        size_t nl = strlen(name);
+        if (nl > 4 && name[nl-4] == '.') {
+            const char *ext = name + nl - 4;
+            int isimg = (!strcmp(ext, ".png") || !strcmp(ext, ".svg") ||
+                         !strcmp(ext, ".xpm") || !strcmp(ext, ".ico"));
+            if (isimg) {
+                snprintf(norm, sizeof norm, "%.*s", (int)(nl - 4), name);
+                name = norm;
+            }
+        }
+    }
     /* Prefer a larger source and downsample it. The 24px ICO conversions
        lose the Fluent silhouette at taskbar scale and can look like blank
        blue bars; 48/32px sources retain the colored shape. */
@@ -1841,9 +1911,26 @@ static void icache_put(const char *key, Pixmap pm) {
 
 static void icache_clear(void) {
     for (int i = 0; i < nicache; i++)
-        if (icache[i].pm) XFreePixmap(dpy, icache[i].pm);
+        if (icache[i].pm && icache[i].pm != (Pixmap)1)
+            XFreePixmap(dpy, icache[i].pm);
     memset(icache, 0, sizeof icache);
     nicache = 0;
+}
+
+/* Drop only one window's cached task pixmap (key prefix "W<id>@").
+   Used when that window republishes _NET_WM_ICON / WM_CLASS, so one app's
+   icon refresh never evicts every other icon on the bar. */
+static void icache_evict_prefix(const char *pfx) {
+    size_t pl = strlen(pfx);
+    for (int i = 0; i < nicache; ) {
+        if (!strncmp(icache[i].key, pfx, pl)) {
+            if (icache[i].pm && icache[i].pm != (Pixmap)1)
+                XFreePixmap(dpy, icache[i].pm);
+            memmove(&icache[i], &icache[i + 1],
+                    (size_t)(nicache - i - 1) * sizeof(ICache));
+            nicache--;
+        } else i++;
+    }
 }
 
 /*
@@ -1930,7 +2017,7 @@ static Pixmap icon_for_task(Window w, int size) {
     char key[160];
     snprintf(key, sizeof key, "W%lu@%d@%s", (unsigned long)w, size, cls);
     Pixmap pm = icache_find(key);
-    if (pm) return pm;
+    if (pm) return pm == (Pixmap)1 ? None : pm;   /* 1 = "no icon" sentinel */
 
     /* Known ElevenDE apps must prefer the packaged Fluent-style image. Qt/GTK
        clients sometimes publish a transparent or all-black _NET_WM_ICON during
@@ -1941,7 +2028,19 @@ static Pixmap icon_for_task(Window w, int size) {
         set_rgb(&bg, &cc_task);
         pm = neticon_pm(w, size, &bg);
     }
+    /* Last resort for third-party apps that publish neither _NET_WM_ICON nor
+       a themed icon named after their class: the Icon= of the installed
+       .desktop entry that declares StartupWMClass (or the desktop id itself)
+       -- this is what browsers/Electron apps resolve to in Windows. */
+    if (!pm && cls[0]) {
+        const char *dicon = desktop_icon_for_class(cls);
+        if (dicon && dicon[0]) pm = icon_for_exact(dicon, size, &cc_task);
+    }
+    /* Negative-cache the miss: without this, every taskbar redraw re-ran the
+       whole lookup chain for apps that simply have no icon (visible as a
+       flickering blank slot while the bar repaints on hover). */
     if (pm) icache_put(key, pm);
+    else icache_put(key, (Pixmap)1);
     return pm;
 }
 
@@ -2029,7 +2128,7 @@ static const char *app_icon_name(const char *cls) {
         { "elevende-settings", "preferences-system" },
         { "elevende-taskmgr", "utilities-system-monitor" },
         { "elevende-notepad", "accessories-text-editor" },
-        { "elevende-photos",  "image-x-generic" },
+        { "eog",              "image-x-generic" },
         { "org.gnome.systemmonitor", "utilities-system-monitor" },
         { "gnome-system-monitor", "utilities-system-monitor" },
         { "xfce4-taskmanager", "utilities-system-monitor" },
@@ -2137,7 +2236,12 @@ static void tray_dock(Window w) {
     XChangeProperty(dpy, w, atom("_XEMBED_INFO"), XA_CARDINAL, 32,
                     PropModeReplace, (unsigned char *)info, 2);
     XSelectInput(dpy, w, StructureNotifyMask);
-    XReparentWindow(dpy, w, win_tray, 4 + ntray * TRAY_SLOT, 6);
+    /* centre each embedded icon in its slot: vertically at BAR_H/2 like the
+       built-in network/volume/battery pictograms (they are 20px at BAR_H/2),
+       horizontally with a 2px in-slot gutter instead of the old 4px/6px
+       offsets that made third-party icons sit high and off-centre */
+    XReparentWindow(dpy, w, win_tray, ntray * TRAY_SLOT + (TRAY_SLOT - (TRAY_SLOT - 4)) / 2,
+                    (BAR_H - (TRAY_SLOT - 4)) / 2);
     tray_wins[ntray++] = w;
     XResizeWindow(dpy, w, TRAY_SLOT - 4, TRAY_SLOT - 4);
     tray_layout();
@@ -2182,7 +2286,9 @@ static void tray_layout(void) {
         tray_mapped = 0;
     }
     for (int i = 0; i < ntray; i++)
-        XMoveResizeWindow(dpy, tray_wins[i], 4 + i * TRAY_SLOT, 6,
+        XMoveResizeWindow(dpy, tray_wins[i],
+                          i * TRAY_SLOT + (TRAY_SLOT - (TRAY_SLOT - 4)) / 2,
+                          (BAR_H - (TRAY_SLOT - 4)) / 2,
                           TRAY_SLOT - 4, TRAY_SLOT - 4);
     draw_tray();
 }
@@ -2247,6 +2353,7 @@ static void cal_hide(void) {
 
 static void cal_toggle(void) {
     if (cal_visible) { cal_hide(); return; }
+    net_hide();                 /* one shell flyout at a time */
     cal_off = 0;
     XMoveResizeWindow(dpy, win_cal, scr_w - CAL_W - 6,
                       scr_h - BAR_H - CAL_H - 4, CAL_W, CAL_H);
@@ -2658,6 +2765,7 @@ static void draw_vol_flyout(void) {
 }
 
 static void vol_show(void) {
+    net_hide();                 /* one shell flyout at a time */
     if (!win_vol) {
         win_vol = mk_owindow(0, 0, VOL_W, VOL_H);
         xd_vol = XftDrawCreate(dpy, win_vol, vis, cmap);
@@ -2679,6 +2787,528 @@ static void vol_hide(void) {
     if (vol_visible && win_vol) XUnmapWindow(dpy, win_vol);
     vol_visible = 0;
     vol_drag = 0;
+}
+
+/* ------------------------- fullscreen auto-hide taskbar ------------------- */
+static int bar_hidden = 0;    /* a fullscreen client owns the screen */
+static int bar_peeked = 0;    /* temporarily shown by touching the bottom edge */
+
+static int window_is_fullscreen(Window w) {
+    if (!w || w == None) return 0;
+    Atom type = None;
+    int fmt = 0;
+    unsigned long nitems = 0, after = 0;
+    unsigned char *prop = NULL;
+    int fs = 0;
+    if (XGetWindowProperty(dpy, w, atom("_NET_WM_STATE"), 0, 64, False, XA_ATOM,
+                           &type, &fmt, &nitems, &after, &prop) == Success &&
+        prop && type == XA_ATOM) {
+        Atom *atoms = (Atom *)prop;
+        Atom full = atom("_NET_WM_STATE_FULLSCREEN");
+        for (unsigned long i = 0; i < nitems; i++)
+            if (atoms[i] == full) { fs = 1; break; }
+    }
+    if (prop) XFree(prop);
+    return fs;
+}
+
+static void bar_set_hidden(int hide) {
+    if (!win_bar) return;
+    if (hide && !bar_hidden) {
+        bar_hidden = 1;
+        bar_peeked = 0;
+        XUnmapWindow(dpy, win_bar);
+        if (vol_visible) vol_hide();
+        if (cal_visible) cal_hide();
+        if (net_visible) net_hide();
+        bar_dirty = 1;
+    } else if (!hide && bar_hidden) {
+        bar_hidden = 0;
+        bar_peeked = 0;
+        XMapRaised(dpy, win_bar);
+        bar_dirty = 1;
+    }
+}
+
+/* Windows 11 behaviour: a fullscreen client hides the taskbar; sweeping the
+   pointer against the bottom edge brings it back until the pointer leaves.
+   Root/pointer motion events do NOT reach us while a fullscreen client owns
+   the pointer, so the reveal is polled with XQueryPointer instead. */
+static void bar_fullscreen_update(void) {
+    int fs = window_is_fullscreen(g_active);
+    if (fs != bar_hidden) bar_set_hidden(fs);
+    if (bar_hidden && win_bar) {
+        Window r1, c1;
+        int rx, ry, wx, wy;
+        unsigned int mask;
+        if (XQueryPointer(dpy, root, &r1, &c1, &rx, &ry, &wx, &wy, &mask)) {
+            int at_edge = ry >= scr_h - 4;
+            if (at_edge && !bar_peeked) {
+                XMapRaised(dpy, win_bar);
+                bar_peeked = 1;
+                bar_dirty = 1;
+            } else if (bar_peeked && ry < scr_h - BAR_H - 8) {
+                XUnmapWindow(dpy, win_bar);
+                bar_peeked = 0;
+                bar_dirty = 1;
+            }
+        }
+    }
+}
+
+/* ------------------------------ native Wi-Fi flyout ----------------------- *
+ * The old behavior ran `sas-screen --network`, which jumped to another app
+ * just to show a WLAN list.  This is the Win11-style quick-setting panel:
+ * radio toggle + a live NetworkManager scan list with signal/lock glyphs,
+ * tap-to-connect (saved profile, open AP or password prompt).  Everything is
+ * driven by nmcli in a forked child so the shell never blocks on D-Bus.    */
+#define NET_W      300
+#define NET_HDR    46
+#define NET_ROW    34
+#define NET_MAXR   6
+#define NET_STATUS 26
+
+typedef struct {
+    char ssid[80];
+    int  signal;      /* 0..100 */
+    int  secure;
+    int  inuse;
+} NetRow;
+
+static XftDraw *xd_net = 0;
+static NetRow   net_rows[NET_MAXR];
+static int      net_n = 0;
+static int      net_radio_on = 1;
+static int      net_hover = -1;
+static char     net_status[128] = "";
+static int      net_status_sticky = 0;   /* keep through the next scan     */
+static int      net_h = 0;              /* current window height           */
+static pid_t    net_pid = 0;         /* running nmcli child              */
+static int      net_job = 0;         /* 1 scan, 2 connect, 3 radio toggle */
+static int      net_pw_mode = 0;     /* password prompt is up            */
+static char     net_ssid[80] = "";
+static char     net_pw[64] = "";
+
+static void shq(char *dst, size_t n, const char *s) {   /* shell single-quote */
+    size_t o = 0;
+    if (o + 1 < n) dst[o++] = '\'';
+    for (; *s && o + 3 < n; s++) {
+        if (*s == '\'') { dst[o++] = '\''; dst[o++] = '\\'; dst[o++] = '\''; dst[o++] = '\''; }
+        else dst[o++] = *s;
+    }
+    if (o + 2 < n) { dst[o++] = '\''; dst[o] = 0; }
+    else dst[n - 1] = 0;
+}
+
+static void net_out_path(char *buf, size_t n) {
+    snprintf(buf, n, "/tmp/.elevende-net-%d.out", (int)getpid());
+}
+
+static void net_start_job(int kind, const char *cmd) {
+    if (net_pid > 0) return;              /* one job at a time */
+    char out[128];
+    net_out_path(out, sizeof out);
+    pid_t p = fork();
+    if (p == 0) {
+        setsid();
+        int fd = open(out, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); close(fd); }
+        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+        _exit(127);
+    }
+    if (p > 0) { net_pid = p; net_job = kind; }
+}
+
+static void net_scan(void) {
+    if (net_pid > 0) return;
+    net_start_job(1,
+        "if ! command -v nmcli >/dev/null 2>&1; then echo NO_NMCLI; exit 0; fi; "
+        "printf 'WIFI:'; nmcli -t -f WIFI general 2>/dev/null; "
+        "nmcli -t -f SSID,SIGNAL,SECURITY,IN-USE dev wifi list --rescan no 2>/dev/null");
+}
+
+/* nmcli -t escapes ':' inside values as "\:" -- split accordingly */
+static int net_split(char *line, char *f[], int max) {
+    int n = 0;
+    char *w = line;
+    f[n++] = line;
+    for (char *p = line; *p; p++) {
+        if (*p == '\\' && p[1]) { *w++ = p[1]; p++; continue; }
+        if (*p == ':') { *w++ = 0; if (n < max) f[n++] = p + 1; else break; continue; }
+        *w++ = *p;
+    }
+    *w = 0;
+    return n;
+}
+
+static void net_parse(void) {
+    char out[128];
+    net_out_path(out, sizeof out);
+    FILE *f = fopen(out, "r");
+    net_n = 0;
+    net_hover = -1;
+    net_radio_on = 1;
+    if (!f) { snprintf(net_status, sizeof net_status, "无法获取网络列表");
+              net_status_sticky = 0; return; }
+    char ln[512];
+    if (!fgets(ln, sizeof ln, f)) {
+        fclose(f);
+        snprintf(net_status, sizeof net_status, "无法获取网络列表");
+        net_status_sticky = 0;
+        return;
+    }
+    if (!strncmp(ln, "NO_NMCLI", 8)) {
+        fclose(f);
+        snprintf(net_status, sizeof net_status, "未找到 NetworkManager (nmcli)");
+        net_status_sticky = 1;
+        return;
+    }
+    /* a fresh list supersedes "正在扫描…"/"未找到无线网络", but a
+       connect result ("已连接 …" / "密码错误") must stay visible */
+    if (!net_status_sticky) net_status[0] = 0;
+    if (!strncmp(ln, "WIFI:", 5)) {
+        char *v = ln + 5;
+        while (*v == ' ' || *v == '\t') v++;
+        net_radio_on = !strncmp(v, "disabled", 8) ? 0 : 1;
+    }
+    while (fgets(ln, sizeof ln, f) && net_n < NET_MAXR) {
+        size_t l = strlen(ln);
+        while (l && (ln[l - 1] == '\n' || ln[l - 1] == '\r')) ln[--l] = 0;
+        char *f4[4] = { 0 };
+        int nf = net_split(ln, f4, 4);
+        if (nf < 2 || !f4[0][0]) continue;              /* hidden SSID */
+        NetRow r;
+        memset(&r, 0, sizeof r);
+        snprintf(r.ssid, sizeof r.ssid, "%s", f4[0]);
+        r.signal = atoi(f4[1]);
+        if (r.signal < 0) r.signal = 0;
+        if (r.signal > 100) r.signal = 100;
+        r.secure = (nf >= 3 && f4[2][0] && strcmp(f4[2], "--")) ? 1 : 0;
+        r.inuse  = (nf >= 4 && f4[3][0] && f4[3][0] != '-') ? 1 : 0;
+        int dup = 0;
+        for (int i = 0; i < net_n; i++)
+            if (!strcmp(net_rows[i].ssid, r.ssid)) {
+                dup = 1;
+                if (r.signal > net_rows[i].signal) net_rows[i] = r;
+                break;
+            }
+        if (!dup) net_rows[net_n++] = r;
+    }
+    fclose(f);
+    /* strongest first, in-use pinned to the top */
+    for (int i = 0; i < net_n; i++)
+        for (int j = i + 1; j < net_n; j++) {
+            int ai = net_rows[i].inuse, aj = net_rows[j].inuse;
+            if (aj > ai || (aj == ai && net_rows[j].signal > net_rows[i].signal)) {
+                NetRow t = net_rows[i]; net_rows[i] = net_rows[j]; net_rows[j] = t;
+            }
+        }
+    if (!net_n) {
+        if (!net_status_sticky)
+            snprintf(net_status, sizeof net_status,
+                     net_radio_on ? "未找到无线网络" : "Wi-Fi 已关闭");
+    } else if (!net_radio_on) {
+        snprintf(net_status, sizeof net_status, "Wi-Fi 已关闭");
+        net_status_sticky = 1;
+    }
+}
+
+static void net_finish_job(void) {
+    int kind = net_job;
+    net_pid = 0;
+    net_job = 0;
+    if (kind == 1) {                     /* scan: list is on disk now */
+        net_parse();
+        if (net_visible) draw_net();
+        return;
+    }
+    if (kind == 3) {                     /* radio toggle -> rescan */
+        net_scan();
+        return;
+    }
+    if (kind == 2) {                     /* connect attempt finished */
+        char out[128];
+        net_out_path(out, sizeof out);
+        FILE *f = fopen(out, "r");
+        char ln[512], last[160] = "";
+        int rc = -1;
+        if (f) {
+            while (fgets(ln, sizeof ln, f)) {
+                size_t l = strlen(ln);
+                while (l && (ln[l - 1] == '\n' || ln[l - 1] == '\r')) ln[--l] = 0;
+                if (!strncmp(ln, "RC:", 3)) { rc = atoi(ln + 3); continue; }
+                if (l) snprintf(last, sizeof last, "%s", ln);
+            }
+            fclose(f);
+        }
+        net_pw[0] = 0;
+        if (rc == 0) {
+            net_pw_mode = 0;
+            snprintf(net_status, sizeof net_status, "已连接 %s", net_ssid);
+            net_status_sticky = 1;
+            net_scan();
+        } else if (!net_pw_mode && last[0]) {
+            /* Secured AP without a stored profile: nmcli reports missing
+               secrets -- switch the panel into password-entry mode instead
+               of dropping the user into the system settings app. */
+            for (char *p = last; *p; p++)
+                if (*p >= 'A' && *p <= 'Z') *p += 32;
+            const char *low = last;
+            if (strstr(low, "secret") || strstr(low, "password") ||
+                strstr(low, "802-11") || strstr(low, "passphrase")) {
+                net_pw_mode = 1;
+                snprintf(net_status, sizeof net_status, "需要密码：%s", net_ssid);
+                /* keyboard focus so the password can be typed right here */
+                XSetInputFocus(dpy, win_net, RevertToPointerRoot, CurrentTime);
+            } else {
+                snprintf(net_status, sizeof net_status, "连接失败");
+            }
+            net_status_sticky = 1;
+        } else if (net_pw_mode) {
+            snprintf(net_status, sizeof net_status, "密码错误，请重试");
+            net_status_sticky = 1;
+        } else {
+            snprintf(net_status, sizeof net_status, "连接失败");
+            net_status_sticky = 1;
+        }
+        if (net_visible) draw_net();
+        return;
+    }
+}
+
+static void net_poll(void) {
+    if (net_pid > 0 && kill(net_pid, 0) != 0) net_finish_job();
+}
+
+static int net_height(void) {
+    int h = NET_HDR;
+    if (net_pw_mode) {
+        h += 34 + 40 + 26;
+    } else {
+        h += (net_n ? net_n : 1) * NET_ROW;
+        if (net_status[0]) h += NET_STATUS;
+    }
+    return h + 8;
+}
+
+static void draw_net(void) {
+    if (!win_net) return;
+    int W = NET_W, H = net_height();
+    /* the row count (and therefore the panel height) changes after every
+       scan, so re-seat the window before painting into it */
+    if (H != net_h) net_place();
+    fill_round(win_net, bgc, 0, 0, W, H, 12, cc_menu.pixel);
+
+    /* header: label + Wi-Fi on/off switch */
+    draw_str(win_net, xd_net, f_bar, &cc_text, 16, 14, "Wi-Fi");
+    int tgx = W - 16 - 44, tgy = (NET_HDR - 20) / 2;
+    fill_round(win_net, bgc, tgx, tgy, 44, 20, 10,
+               net_radio_on ? cc_accent.pixel : cc_track.pixel);
+    XSetForeground(dpy, bgc, cc_hi.pixel);
+    XFillRectangle(dpy, win_net, bgc, tgx + (net_radio_on ? 44 - 20 : 2),
+                   tgy + 2, 16, 16);
+
+    int y = NET_HDR;
+    if (net_pw_mode) {
+        int tw = text_w(f_small, net_ssid);
+        char lbl[128];
+        snprintf(lbl, sizeof lbl, "连接到 %s", net_ssid);
+        draw_str(win_net, xd_net, f_small, &cc_sub, 16, y + 6, lbl);
+        (void)tw;
+        y += 34;
+        fill_round(win_net, bgc, 16, y, W - 32, 34, 6, cc_search.pixel);
+        char shown[80] = "";
+        size_t n = strlen(net_pw);
+        for (size_t i = 0; i < n && i + 1 < sizeof shown; i++) shown[i] = '*';
+        if (n == 0) snprintf(shown, sizeof shown, "输入 Wi-Fi 密码");
+        draw_str(win_net, xd_net, f_bar,
+                 n ? &cc_text : &cc_sub, 26, y + 34 / 2 - f_bar->height / 2 + f_bar->ascent,
+                 shown);
+        y += 40;
+        draw_str(win_net, xd_net, f_small, &cc_sub, 16, y + 4,
+                 "Enter 连接 · Esc 取消");
+        y += 26;
+    } else if (!net_n) {
+        draw_str(win_net, xd_net, f_small, &cc_sub, 16, y + NET_ROW / 2 - 6,
+                 net_radio_on ? "正在扫描…" : "Wi-Fi 已关闭");
+        y += NET_ROW;
+    } else {
+        for (int i = 0; i < net_n; i++) {
+            if (i == net_hover)
+                fill_round(win_net, bgc, 6, y + 2, W - 12, NET_ROW - 4, 6,
+                           cc_selwash.pixel);
+            draw_str(win_net, xd_net, f_small,
+                     net_rows[i].inuse ? &cc_accent : &cc_text,
+                     16, y + NET_ROW / 2 - 6, net_rows[i].ssid);
+            /* signal strength: four ascending bars, filled per 25% */
+            int bx = W - 24 - 4 * 5;
+            for (int b = 0; b < 4; b++) {
+                int bh = 4 + b * 4;
+                int on = net_rows[i].signal >= b * 25 + 12;
+                fill(win_net, bgc, bx + b * 5, y + NET_ROW / 2 + 8 - bh, 3, bh,
+                     on ? cc_text.pixel : cc_track.pixel);
+            }
+            if (net_rows[i].secure) {
+                /* small padlock, right of the SSID block */
+                int lx = bx - 22, ly = y + NET_ROW / 2 - 6;
+                XSetForeground(dpy, bgc, cc_sub.pixel);
+                XFillRectangle(dpy, win_net, bgc, lx, ly + 4, 10, 8);
+                XSetLineAttributes(dpy, bgc, 2, LineSolid, CapRound, JoinRound);
+                XDrawArc(dpy, win_net, bgc, lx + 2, ly, 6, 8, 180 * 64, 180 * 64);
+                XSetLineAttributes(dpy, bgc, 1, LineSolid, CapButt, JoinMiter);
+            }
+            y += NET_ROW;
+        }
+    }
+    if (!net_pw_mode && net_status[0]) {
+        draw_str(win_net, xd_net, f_small, &cc_sub, 16, y + 6, net_status);
+        y += NET_STATUS;
+    }
+    (void)H;
+}
+
+static void net_place(void) {
+    if (!win_net) return;
+    int H = net_height();
+    net_h = H;
+    int x = (net_r.x + net_r.w / 2) - NET_W / 2;
+    if (x + NET_W > scr_w - 8) x = scr_w - NET_W - 8;
+    if (x < 8) x = 8;
+    int y = scr_h - BAR_H - H - 8;
+    if (y < 8) y = 8;
+    XMoveResizeWindow(dpy, win_net, x, y, NET_W, H);
+}
+
+static void net_show(void) {
+    if (!win_net) {
+        win_net = mk_owindow(0, 0, NET_W, NET_HDR + NET_ROW + 8);
+        xd_net = XftDrawCreate(dpy, win_net, vis, cmap);
+        XSelectInput(dpy, win_net, ExposureMask | ButtonPressMask |
+                                   ButtonReleaseMask | PointerMotionMask |
+                                   KeyPressMask | EnterWindowMask | LeaveWindowMask);
+    }
+    cal_hide();
+    vol_hide();
+    power_hide();
+    menu_hide();
+    search_hide();
+    net_pw_mode = 0;
+    net_pw[0] = 0;
+    net_status[0] = 0;              /* fresh open -> fresh status line */
+    net_status_sticky = 0;
+    snprintf(net_status, sizeof net_status, "正在扫描…");
+    net_place();
+    XMapRaised(dpy, win_net);
+    net_visible = 1;
+    draw_net();
+    net_scan();
+    XFlush(dpy);
+}
+
+static void net_hide(void) {
+    if (net_visible && win_net) XUnmapWindow(dpy, win_net);
+    net_visible = 0;
+    net_hover = -1;
+    net_pw_mode = 0;
+    net_pw[0] = 0;
+}
+
+static void net_connect(void) {
+    char sq[192], cmd[768];
+    shq(sq, sizeof sq, net_ssid);
+    if (net_pw[0]) {
+        char pq[160];
+        shq(pq, sizeof pq, net_pw);
+        snprintf(cmd, sizeof cmd,
+                 "if nmcli -g NAME con show 2>/dev/null | grep -Fqx %s; then "
+                 "nmcli con up id %s; else nmcli dev wifi connect %s password %s; fi; "
+                 "echo RC:$?",
+                 sq, sq, sq, pq);
+    } else {
+        snprintf(cmd, sizeof cmd,
+                 "if nmcli -g NAME con show 2>/dev/null | grep -Fqx %s; then "
+                 "nmcli con up id %s; else nmcli dev wifi connect %s; fi; echo RC:$?",
+                 sq, sq, sq);
+    }
+    snprintf(net_status, sizeof net_status, "正在连接 %s…", net_ssid);
+    net_status_sticky = 1;
+    draw_net();
+    net_start_job(2, cmd);
+    if (net_pid <= 0) snprintf(net_status, sizeof net_status, "无法启动 nmcli");
+}
+
+static int net_row_at(int y) {
+    if (net_pw_mode || !net_n) return -1;
+    int i = (y - NET_HDR) / NET_ROW;
+    if (y < NET_HDR || i < 0 || i >= net_n) return -1;
+    return i;
+}
+
+static void handle_net_press(int but, int x, int y) {
+    if (but == Button4 || but == Button5) return;
+    if (but != Button1) { net_hide(); return; }
+    if (y < NET_HDR) {
+        if (x >= NET_W - 16 - 44 - 8) {                 /* radio switch */
+            if (net_pid > 0) return;
+            net_radio_on = !net_radio_on;
+            net_start_job(3, net_radio_on ? "nmcli radio wifi on"
+                                          : "nmcli radio wifi off");
+            if (net_pid <= 0) net_radio_on = !net_radio_on;   /* rolled back */
+            snprintf(net_status, sizeof net_status,
+                     net_radio_on ? "正在开启 Wi-Fi…" : "正在关闭 Wi-Fi…");
+            net_status_sticky = 1;
+            net_n = 0;
+            draw_net();
+        }
+        return;
+    }
+    if (net_pw_mode) return;                            /* keys handle it */
+    int r = net_row_at(y);
+    if (r >= 0) {
+        snprintf(net_ssid, sizeof net_ssid, "%s", net_rows[r].ssid);
+        if (net_rows[r].inuse) {
+            snprintf(net_status, sizeof net_status, "已连接 %s", net_ssid);
+            net_status_sticky = 1;
+            draw_net();
+            return;
+        }
+        net_connect();
+    }
+}
+
+static void handle_net_motion(int x, int y) {
+    (void)x;
+    int h = net_row_at(y);
+    if (h != net_hover) { net_hover = h; draw_net(); }
+}
+
+static void handle_net_key(const XKeyEvent *ev) {
+    KeySym ks = XLookupKeysym((XKeyEvent *)ev, 0);
+    if (ks == XK_Escape) {
+        if (net_pw_mode) { net_pw_mode = 0; net_pw[0] = 0;
+                           net_status[0] = 0; net_status_sticky = 0;
+                           draw_net(); }
+        else net_hide();
+        return;
+    }
+    if (!net_pw_mode) return;
+    if (ks == XK_Return || ks == XK_KP_Enter) {
+        if (!net_pw[0]) return;
+        net_connect();
+        return;
+    }
+    if (ks == XK_BackSpace) {
+        size_t n = strlen(net_pw);
+        if (n) net_pw[n - 1] = 0;
+        draw_net();
+        return;
+    }
+    char mb[16];
+    int n = XLookupString((XKeyEvent *)ev, mb, sizeof mb, NULL, NULL);
+    if (n == 1 && mb[0] >= 32 && mb[0] < 127 && strlen(net_pw) + 1 < sizeof net_pw) {
+        net_pw[strlen(net_pw)] = mb[0];
+        draw_net();
+    }
 }
 
 static void vol_slider_from_x(int x) {
@@ -2740,26 +3370,27 @@ static void draw_taskbar(void) {
         /* Use a 36px source/render size inside the 42px Win11 task button.
            This keeps the full Fluent silhouette visible on light surfaces;
            24/32px versions can look like an empty blue tile. */
+        /* icon_for_task resolves the full chain (known map -> _NET_WM_ICON
+           -> .desktop Icon by WM_CLASS) and negative-caches misses. */
         Pixmap pm = icon_for_task(tasks[i].win, 36);
         char cls[64] = "";
-        if (!pm) {
-            win_class(tasks[i].win, cls, sizeof cls);
-            if (cls[0])
-                pm = icon_for_exact(app_icon_name(cls), 36, &cc_task);
-        }
         if (pm) {
             int isz = tw < 36 ? tw - 4 : 36;
             if (isz < 20) isz = 20;
             draw_icon(win_bar, pm, isz, bx, ty - 1, tw, th);
         } else {
-            if (!cls[0]) win_class(tasks[i].win, cls, sizeof cls);
+            win_class(tasks[i].win, cls, sizeof cls);
             draw_icon_kind(win_bar, app_icon_kind(cls), bx + tw / 2,
                            ty + th / 2 - 1, 28, cc_accent.pixel);
         }
     }
 
     /* ---- right cluster: [tray icons][network][audio/battery][IME][clock][|desk] ---- */
-    net_r = (RRect){ pill_r.x + 56, pill_r.y, 26, pill_r.h };
+    /* The network hit region must sit ON the network pictogram (drawn at
+       pill_r.x + 5, 24px slot). The old offset (+56) landed on the battery
+       icon, so clicking the WiFi glyph did nothing while the battery opened
+       the WLAN panel. */
+    net_r = (RRect){ pill_r.x + 5, pill_r.y, 24, pill_r.h };
     /* Keep the compact native tray surface; the network segment remains a
        separate full-height hit target so it can open the real WLAN panel. */
     if (in_rect(pill_r, pmx, pmy) && !in_rect(net_r, pmx, pmy))
@@ -2842,7 +3473,10 @@ static void paint_desktop(void) {
     if (!win_desk) return;
     if (wall_ok && wall_pm) {
         XCopyArea(dpy, wall_pm, win_desk, bgc, 0, 0, scr_w, scr_h - BAR_H, 0, 0);
-        XFlush(dpy);
+        /* No XFlush here: flushing halfway through the repaint showed the
+         * wallpaper WITHOUT the icons for a frame, which is exactly the
+         * flicker seen on every desktop-icon click. The frame is flushed
+         * once at the end of paint_desktop(). */
     } else {
         for (int i = 0; i < ngcol; i++) {
             int y = i * scr_h / ngcol;
@@ -2850,28 +3484,34 @@ static void paint_desktop(void) {
         }
     }
     for (int i = 0; i < nic; i++) {
-        if (i == sel_icon) {                 /* Win11 whole-cell selection box */
-            /* eased pop-in, same feel as the Start-menu hover chip */
-            /* A restrained opacity fade reads more like Windows 11 than a
-             * bouncing card. It also avoids redraw jitter while selecting many
-             * desktop icons on lower-end X11 systems. */
-            float ease = sel_anim * (2.0f - sel_anim);
-            int fw = ICON_W + 8, fh = ICON_H + 8;
-            int fx = ic[i].x - 4, fy = ic[i].y - 4;
-            desk_tint(fx, fy, fw, fh, 0xFFFFFF, 36 + (int)(26 * ease), 10);
-            XSetForeground(dpy, bgc, cc_sel.pixel);
-            XSetLineAttributes(dpy, bgc, 2, LineSolid, CapRound, JoinRound);
-            int r = 10;
-            XDrawArc(dpy, win_desk, bgc, fx + 1, fy + 1, 2 * r, 2 * r, 90 * 64, 90 * 64);
-            XDrawArc(dpy, win_desk, bgc, fx + fw - 2 * r - 1, fy + 1, 2 * r, 2 * r, 0, 90 * 64);
-            XDrawArc(dpy, win_desk, bgc, fx + 1, fy + fh - 2 * r - 1, 2 * r, 2 * r, 180 * 64, 90 * 64);
-            XDrawArc(dpy, win_desk, bgc, fx + fw - 2 * r - 1, fy + fh - 2 * r - 1, 2 * r, 2 * r, 270 * 64, 90 * 64);
-            XDrawLine(dpy, win_desk, bgc, fx + r + 1, fy + 1, fx + fw - r - 1, fy + 1);
-            XDrawLine(dpy, win_desk, bgc, fx + r + 1, fy + fh - 1, fx + fw - r - 1, fy + fh - 1);
-            XDrawLine(dpy, win_desk, bgc, fx + 1, fy + r + 1, fx + 1, fy + fh - r - 1);
-            XDrawLine(dpy, win_desk, bgc, fx + fw - 1, fy + r + 1, fx + fw - 1, fy + fh - r - 1);
-            XSetLineAttributes(dpy, bgc, 1, LineSolid, CapButt, JoinMiter);
+        int dragging = (i == press_icon && dragging_icon);
+        /* While dragging: the selection box marks the LANDING cell, the icon
+         * floats with the cursor, and its origin slot keeps a faint wash.
+         * After release the icon glides into place (settle animation). */
+        int cellx = dragging ? drag_tx : ic[i].x;
+        int celly = dragging ? drag_ty : ic[i].y;
+        int ix = dragging ? drag_gx : ic[i].x;
+        int iy = dragging ? drag_gy : ic[i].y;
+        if (settle_act && i == settle_icon) {
+            float e = settle_t * (2.0f - settle_t);       /* ease-out glide */
+            ix = settle_fx + (int)((ic[i].x - settle_fx) * e);
+            iy = settle_fy + (int)((ic[i].y - settle_fy) * e);
         }
+        if (i == sel_icon) {
+            /* Explorer-style item selection: ONE rounded light-blue wash
+             * (#CBE4F6 -- the exact QTreeView::item:selected colour used by
+             * 资源管理器 in light mode) instead of the old white wash plus a
+             * 2px accent ring with four XDrawArc corners. Fill-only reads
+             * the same in both programs and never flickers. */
+            float ease = sel_anim * (2.0f - sel_anim);       /* eased pop-in */
+            int fw = ICON_W + 8, fh = ICON_H + 8;
+            int fx = cellx - 4, fy = celly - 4;
+            desk_tint(fx, fy, fw, fh, 0xCBE4F6,
+                      120 + (int)(90 * ease), 8);
+        }
+        if (dragging)
+            desk_tint(ic[i].x - 4, ic[i].y - 4, ICON_W + 8, ICON_H + 8,
+                      0xFFFFFF, 30, 10);     /* placeholder in the origin slot */
         /* Win11 hover wash (under the selection ring when both apply) */
         if (i == hover_icon && i != sel_icon)
             desk_tint(ic[i].x - 4, ic[i].y - 4, ICON_W + 8, ICON_H + 8,
@@ -2892,27 +3532,31 @@ static void paint_desktop(void) {
             nm = "documents";
         } else if (ic[i].is_dir && strstr(ic[i].label, "图片")) {
             nm = "pictures";
+        } else if (ic[i].icon[0]) {
+            /* *.desktop launcher: use the entry's own Icon= (name or path),
+               not a generic executable glyph */
+            nm = ic[i].icon;
         }
         /* true-alpha rendering over the wallpaper (no opaque icon boxes) */
         const char *ipath = theme_find(nm, 64);
         IconRGBA *ib = ipath ? icon_rgba_for_path(ipath, 64) : NULL;
         if (ib)
-            desk_draw_icon_alpha(ib, ic[i].x + 16, ic[i].y + 2);
+            desk_draw_icon_alpha(ib, ix + 16, iy + 2);
         else
-            draw_icon_kind(win_desk, kind, ic[i].x + 48, ic[i].y + 34, 56,
+            draw_icon_kind(win_desk, kind, ix + 48, iy + 34, 56,
                            cc_light.pixel);
         /* label: truncated with an ellipsis when too long, then drawn with
          * a soft dark halo so it stays readable on any wallpaper */
         char label_fit[96];
         fit_label(label_fit, sizeof label_fit, ic[i].label, f_small, ICON_W - 6);
-        const int ly = ic[i].y + 74;
-        draw_str_c(win_desk, xd_desk, f_small, &cc_lo, ic[i].x + 1, ly + 1,
+        const int ly = iy + 74;
+        draw_str_c(win_desk, xd_desk, f_small, &cc_lo, ix + 1, ly + 1,
                    ICON_W, 18, label_fit);
-        draw_str_c(win_desk, xd_desk, f_small, &cc_lo, ic[i].x,     ly + 1,
+        draw_str_c(win_desk, xd_desk, f_small, &cc_lo, ix,     ly + 1,
                    ICON_W, 18, label_fit);
-        draw_str_c(win_desk, xd_desk, f_small, &cc_lo, ic[i].x + 1, ly,
+        draw_str_c(win_desk, xd_desk, f_small, &cc_lo, ix + 1, ly,
                    ICON_W, 18, label_fit);
-        draw_str_c(win_desk, xd_desk, f_small, &cc_text, ic[i].x,   ly,
+        draw_str_c(win_desk, xd_desk, f_small, &cc_text, ix,   ly,
                    ICON_W, 18, label_fit);
     }
     XFlush(dpy);
@@ -2940,6 +3584,11 @@ static Window mk_desktop_window(int w, int h) {
     hint.res_class = (char *)"ElevenDE";
     XSetClassHint(dpy, d, &hint);
     XSetWMProtocols(dpy, d, NULL, 0);
+    /* XDND v5 target: files dragged out of Explorer (or any XDND source)
+     * land on the desktop and are copied into ~/Desktop (see xdnd_*). */
+    long xdnd_aware = 5;
+    XChangeProperty(dpy, d, atom("XdndAware"), XA_ATOM, 32, PropModeReplace,
+                    (unsigned char *)&xdnd_aware, 1);
     return d;
 }
 
@@ -3024,12 +3673,6 @@ static void icon_layout(void) {
     icons_pos_apply();
 }
 
-static int is_interesting_fs(const char *fs) {
-    return !strcmp(fs, "ext4") || !strcmp(fs, "ext3") || !strcmp(fs, "ext2") ||
-           !strcmp(fs, "xfs") || !strcmp(fs, "btrfs") || !strcmp(fs, "f2fs") ||
-           !strcmp(fs, "vfat") || !strcmp(fs, "ntfs") || !strcmp(fs, "exfat");
-}
-
 /* Map a file name to a freedesktop-style mimetype icon so desktop files
  * look like their Windows counterparts (zip folder, picture, media...). */
 static const char *file_icon_name(const char *name) {
@@ -3077,34 +3720,105 @@ static const char *file_icon_name(const char *name) {
     return "text-x-generic";
 }
 
+/* Freedesktop locale for Name[xx] selection: LC_ALL > LC_MESSAGES > LANG,
+ * reduced to "ll_CC" (encoding/@modifier stripped); lang gets the language
+ * part only ("zh_CN" -> "zh").  Empty strings for the C/POSIX locale. */
+static void desktop_locale(char *loc, size_t locsz, char *lang, size_t langsz)
+{
+    loc[0] = 0;
+    lang[0] = 0;
+    const char *e = getenv("LC_ALL");
+    if (!e || !e[0]) e = getenv("LC_MESSAGES");
+    if (!e || !e[0]) e = getenv("LANG");
+    if (!e || !e[0] || !strcmp(e, "C") || !strcmp(e, "POSIX")) return;
+    snprintf(loc, locsz, "%s", e);
+    char *dot = strchr(loc, '.'); if (dot) *dot = 0;
+    char *at = strchr(loc, '@'); if (at) *at = 0;
+    snprintf(lang, langsz, "%s", loc);
+    char *us = strchr(lang, '_');
+    if (us) *us = 0;
+}
+
+/* priority of a Name[xx] key against the session locale:
+ * 0 = exact ll_CC match, 1 = language-only match, -1 = no match */
+static int locale_key_prio(const char *key, const char *loc, const char *lang)
+{
+    if (!key[0]) return -1;
+    if (loc[0] && !strcmp(key, loc)) return 0;
+    if (lang[0] && !strcmp(key, lang)) return 1;
+    return -1;
+}
+
+/* Read Name (+ localized variants) and Icon from the [Desktop Entry] group
+ * of one .desktop file.  Used by the Start menu and by desktop icons so both
+ * show the same localized application name and the entry's own icon. */
+static void read_desktop_entry(const char *path, char *nm, size_t nmsz,
+                               char *ic, size_t icsz, char *ex, size_t exsz)
+{
+    nm[0] = 0;
+    if (icsz) ic[0] = 0;
+    if (exsz) ex[0] = 0;
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char loc[64], lang[64];
+    desktop_locale(loc, sizeof loc, lang, sizeof lang);
+    char best[128] = "";
+    int best_prio = 99;
+    int in_de = 0;
+    char ln[1024];
+    while (fgets(ln, sizeof ln, f)) {
+        char *p = ln;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '[') { in_de = !strncmp(p, "[Desktop Entry]", 15); continue; }
+        if (!in_de) continue;
+        if (!strncmp(p, "Name=", 5)) {
+            if (!nm[0]) { snprintf(nm, nmsz, "%s", p + 5); }
+        } else if (!strncmp(p, "Name[", 5)) {
+            char *eq = strchr(p, '=');
+            char *br = strchr(p, ']');
+            if (eq && br && br < eq) {
+                char key[64];
+                snprintf(key, sizeof key, "%.*s", (int)(br - (p + 5)), p + 5);
+                int prio = locale_key_prio(key, loc, lang);
+                if (prio >= 0 && prio < best_prio) {
+                    best_prio = prio;
+                    snprintf(best, sizeof best, "%s", eq + 1);
+                }
+            }
+        } else if (icsz && !ic[0] && !strncmp(p, "Icon=", 5)) {
+            snprintf(ic, icsz, "%s", p + 5);
+        } else if (exsz && !ex[0] && !strncmp(p, "Exec=", 5)) {
+            snprintf(ex, exsz, "%s", p + 5);
+        }
+    }
+    fclose(f);
+    /* strip trailing newline/CR from every value */
+    for (char *q = nm; *q; q++) if (*q == '\n' || *q == '\r') *q = 0;
+    if (best[0]) {
+        for (char *q = best; *q; q++) if (*q == '\n' || *q == '\r') *q = 0;
+        snprintf(nm, nmsz, "%s", best);        /* localized name wins */
+    }
+    if (ic && icsz) for (char *q = ic; *q; q++) if (*q == '\n' || *q == '\r') *q = 0;
+    if (ex && exsz) for (char *q = ex; *q; q++) if (*q == '\n' || *q == '\r') *q = 0;
+}
+
 static void gen_icons(void) {
     nic = 0;
     const char *home = getenv("HOME") ? getenv("HOME") : "/";
 
     snprintf(ic[nic].label, sizeof ic[nic].label, "此电脑");
     snprintf(ic[nic].path, sizeof ic[nic].path, "/");
+    ic[nic].icon[0] = 0;
     ic[nic++].is_dir = 1;
 
     snprintf(ic[nic].label, sizeof ic[nic].label, "主目录");
     snprintf(ic[nic].path, sizeof ic[nic].path, "%s", home);
+    ic[nic].icon[0] = 0;
     ic[nic++].is_dir = 1;
 
-    FILE *f = fopen("/etc/mtab", "r");
-    if (f) {
-        char ln[1024];
-        while (fgets(ln, sizeof ln, f) && nic < MAX_ICONS) {
-            char dev[256], mp[256], ty[64];
-            if (sscanf(ln, "%255s %255s %63s", dev, mp, ty) != 3) continue;
-            if (!is_interesting_fs(ty)) continue;
-            const char *base = strrchr(mp, '/');
-            base = base ? base + 1 : mp;
-            snprintf(ic[nic].label, sizeof ic[nic].label, "%s",
-                     *base ? base : "本地磁盘");
-            snprintf(ic[nic].path, sizeof ic[nic].path, "%s", mp);
-            ic[nic++].is_dir = 1;
-        }
-        fclose(f);
-    }
+    /* Mount points are NOT shown as desktop icons: disks belong to Explorer's
+     * 此电脑 view.  The /etc/mtab scan used to litter the desktop with
+     * duplicate "root" / "boot/efi" folder icons. */
 
     char dir[512];
     snprintf(dir, sizeof dir, "%s/Desktop", home);
@@ -3113,9 +3827,28 @@ static void gen_icons(void) {
         struct dirent *de;
         while ((de = readdir(dp)) != NULL && nic < MAX_ICONS) {
             if (!de->d_name[0] || de->d_name[0] == '.') continue;
-            snprintf(ic[nic].label, sizeof ic[nic].label, "%s", de->d_name);
             snprintf(ic[nic].path, sizeof ic[nic].path, "%s/%s", dir, de->d_name);
             ic[nic].is_dir = de->d_type == DT_DIR;
+            ic[nic].icon[0] = 0;
+            size_t nl = strlen(de->d_name);
+            if (!ic[nic].is_dir && nl > 8 &&
+                !strcmp(de->d_name + nl - 8, ".desktop")) {
+                /* Freedesktop launcher: show the entry's Name (localized)
+                 * and its own Icon instead of "foo.desktop" + a generic
+                 * executable glyph. */
+                char nmbuf[128] = "";
+                read_desktop_entry(ic[nic].path, nmbuf, sizeof nmbuf,
+                                   ic[nic].icon, sizeof ic[nic].icon, NULL, 0);
+                if (nmbuf[0]) snprintf(ic[nic].label, sizeof ic[nic].label,
+                                       "%s", nmbuf);
+                else {
+                    snprintf(nmbuf, sizeof nmbuf, "%.*s", (int)(nl - 8),
+                             de->d_name);
+                    snprintf(ic[nic].label, sizeof ic[nic].label, "%s", nmbuf);
+                }
+            } else {
+                snprintf(ic[nic].label, sizeof ic[nic].label, "%s", de->d_name);
+            }
             nic++;
         }
         closedir(dp);
@@ -3202,12 +3935,21 @@ static void open_path(const char *path) {
     if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
         snprintf(cmd, sizeof cmd, "explorer.exe '%s'", path);
     } else {
-        /* files go to the DEFAULT application via xdg-open (MIME based).
-         * The old "explorer.exe || xdg-open" never reached xdg-open because
-         * explorer.exe happily "opens" any path -- which is why archives
-         * and documents popped up in the file manager. */
-        snprintf(cmd, sizeof cmd, "xdg-open '%s' || explorer.exe '%s'",
-                 path, path);
+        size_t pl = strlen(path);
+        if (pl > 8 && !strcmp(path + pl - 8, ".desktop")) {
+            /* Freedesktop launcher: EXECUTE it (glib resolves Exec, the
+             * desktop id and fields) -- xdg-open would hand the raw file to
+             * a text editor or the file manager instead of starting the app. */
+            snprintf(cmd, sizeof cmd,
+                     "gio launch '%s' 2>/dev/null || xdg-open '%s'", path, path);
+        } else {
+            /* files go to the DEFAULT application via xdg-open (MIME based).
+             * The old "explorer.exe || xdg-open" never reached xdg-open because
+             * explorer.exe happily "opens" any path -- which is why archives
+             * and documents popped up in the file manager. */
+            snprintf(cmd, sizeof cmd, "xdg-open '%s' || explorer.exe '%s'",
+                     path, path);
+        }
     }
     launch_cmd(cmd);
     menu_hide();
@@ -3257,7 +3999,10 @@ static void parse_desktop_dir(const char *dir) {
         snprintf(path, sizeof path, "%s/%s", dir, de->d_name);
         FILE *f = fopen(path, "r");
         if (!f) continue;
-        char nm[128] = "", zh[128] = "", ex[1024] = "", ic[256] = "";
+        char nm[128] = "", locnm[128] = "", ex[1024] = "", ic[256] = "";
+        char loc[64], loclang[64];
+        int loc_prio = 99;
+        desktop_locale(loc, sizeof loc, loclang, sizeof loclang);
         int nodisplay = 0, hidden = 0, app_type = 0, in_desktop_entry = 0;
         char ln[1024];
         while (fgets(ln, sizeof ln, f)) {
@@ -3274,10 +4019,23 @@ static void parse_desktop_dir(const char *dir) {
                 if (!strncmp(p + 5, "Application", 11)) app_type = 1;
             } else if (!strncmp(p, "Name=", 5) && !nm[0]) {
                 snprintf(nm, sizeof nm, "%s", p + 5);
-            } else if (!strncmp(p, "Name[", 5) && strncmp(p, "Name[en", 7) &&
-                       !zh[0]) {
+            } else if (!strncmp(p, "Name[", 5)) {
+                /* only accept a Name[xx] whose key matches THIS session's
+                 * locale (the old code took the first non-English variant --
+                 * often French -- and only fell back to it when Name= was
+                 * missing, so zh_CN users saw English or wrong-language
+                 * entries depending on file order) */
                 char *eq = strchr(p, '=');
-                if (eq) snprintf(zh, sizeof zh, "%s", eq + 1);
+                char *br = strchr(p, ']');
+                if (eq && br && br < eq) {
+                    char key[64];
+                    snprintf(key, sizeof key, "%.*s", (int)(br - (p + 5)), p + 5);
+                    int prio = locale_key_prio(key, loc, loclang);
+                    if (prio >= 0 && prio < loc_prio) {
+                        loc_prio = prio;
+                        snprintf(locnm, sizeof locnm, "%s", eq + 1);
+                    }
+                }
             } else if (!strncmp(p, "Exec=", 5) && !ex[0]) {
                 snprintf(ex, sizeof ex, "%s", p + 5);
             } else if (!strncmp(p, "Icon=", 5) && !ic[0]) {
@@ -3292,7 +4050,11 @@ static void parse_desktop_dir(const char *dir) {
         if (!app_type || nodisplay || hidden) continue;
         size_t nl = strlen(nm);
         while (nl && (nm[nl-1] == '\n' || nm[nl-1] == '\r')) nm[--nl] = 0;
-        if (!nm[0] && zh[0]) snprintf(nm, sizeof nm, "%s", zh);
+        if (locnm[0]) {
+            char *q = locnm + strlen(locnm);
+            while (q > locnm && (q[-1] == '\n' || q[-1] == '\r')) *--q = 0;
+            if (locnm[0]) snprintf(nm, sizeof nm, "%s", locnm);
+        }
         if (!nm[0]) continue;
         nl = strlen(ex);
         while (nl && (ex[nl-1] == '\n' || ex[nl-1] == '\r')) ex[--nl] = 0;
@@ -3335,6 +4097,76 @@ static int app_dirs_collect(char dirs[APP_DIRS_MAX][512]) {
     snprintf(dirs[n++], sizeof dirs[0], "/usr/share/applications");
     snprintf(dirs[n++], sizeof dirs[0], "/var/lib/flatpak/exports/share/applications");
     return n;
+}
+
+/* Resolve the Icon= of the installed .desktop entry that belongs to a
+   WM_CLASS, so the taskbar can show a real icon for apps that publish
+   neither _NET_WM_ICON nor a theme icon named after their class.
+   Two matches are accepted:
+     - StartupWMClass= equals the class (browsers, Electron apps), or
+     - the desktop file id (stem) equals the class (most other apps).
+   Results (including misses) are cached for the shell's lifetime. */
+static const char *desktop_icon_for_class(const char *cls) {
+    static struct { char cls[64]; char icon[128]; } cache[64];
+    static int ncache = 0;
+    if (!cls || !cls[0]) return NULL;
+    for (int i = 0; i < ncache; i++)
+        if (!strcmp(cache[i].cls, cls))
+            return cache[i].icon[0] ? cache[i].icon : NULL;
+
+    char dirs[APP_DIRS_MAX][512];
+    int ndirs = app_dirs_collect(dirs);
+    char icon[128] = "";
+    for (int d = 0; d < ndirs && !icon[0]; d++) {
+        DIR *dp = opendir(dirs[d]);
+        if (!dp) continue;
+        struct dirent *de;
+        while ((de = readdir(dp)) != NULL && !icon[0]) {
+            size_t len = strlen(de->d_name);
+            if (len < 9 || strcmp(de->d_name + len - 8, ".desktop")) continue;
+            int id_match = 0;
+            if (len - 8 == strlen(cls)) {
+                int same = 1;
+                for (size_t k = 0; k + 8 < len; k++) {
+                    char a = de->d_name[k], b = cls[k];
+                    if (a >= 'A' && a <= 'Z') a += 32;
+                    if (b >= 'A' && b <= 'Z') b += 32;
+                    if (a != b) { same = 0; break; }
+                }
+                id_match = same;
+            }
+            char path[1024], wmclass[128] = "";
+            snprintf(path, sizeof path, "%s/%s", dirs[d], de->d_name);
+            FILE *f = fopen(path, "r");
+            if (!f) continue;
+            int in_de = 0;
+            char ln[1024];
+            while (fgets(ln, sizeof ln, f)) {
+                char *p = ln;
+                while (*p == ' ' || *p == '\t') p++;
+                if (*p == '[') { in_de = !strncmp(p, "[Desktop Entry]", 15); continue; }
+                if (!in_de) continue;
+                if (!strncmp(p, "StartupWMClass=", 15) && !wmclass[0])
+                    snprintf(wmclass, sizeof wmclass, "%s", p + 15);
+                else if (!strncmp(p, "Icon=", 5) && !icon[0])
+                    snprintf(icon, sizeof icon, "%s", p + 5);
+            }
+            fclose(f);
+            for (char *q = wmclass; *q; q++) if (*q == '\n' || *q == '\r') *q = 0;
+            int wm_match = 0;
+            if (wmclass[0] && !strcasecmp(wmclass, cls)) wm_match = 1;
+            if (!wm_match && !id_match) { icon[0] = 0; continue; }
+            for (char *q = icon; *q; q++) if (*q == '\n' || *q == '\r') *q = 0;
+        }
+        closedir(dp);
+    }
+
+    if (ncache < (int)(sizeof cache / sizeof cache[0])) {
+        snprintf(cache[ncache].cls, sizeof cache[ncache].cls, "%s", cls);
+        snprintf(cache[ncache].icon, sizeof cache[ncache].icon, "%s", icon);
+        ncache++;
+    }
+    return icon[0] ? icon : NULL;
 }
 
 static void app_dirs_watch_snapshot(void) {
@@ -3438,6 +4270,11 @@ static void menu_filter_changed(void) {
     filter_apps();
     sel_row = 0;
     apps_scroll = 0;
+    /* pinned tiles are hidden while filtering: drop any stale hover state so
+     * no phantom grow-in animation shows up when the grid returns */
+    menu_tile_idx = -1;
+    menu_tile_prev = -1;
+    tile_anim_act = 0;
     list_vis = list_rows_vis();
     draw_menu();
 }
@@ -3646,10 +4483,28 @@ static void power_hide(void) {
 }
 
 static void menu_hide(void) {
+    gp_reset();          /* a pending tap/long-press dies with the menu */
     power_hide();
     pinmenu_hide();
     ctx_hide();
-    if (menu_visible && win_menu) XUnmapWindow(dpy, win_menu);
+    if (menu_visible && win_menu) {
+        /* Win11-style close: mirror of menu_show()'s slide-up -- glide back
+         * down towards the taskbar (ease-in) before unmapping, instead of
+         * vanishing in one frame. The 5-frame loop is a short block; state
+         * below is only cleared afterwards, so nothing re-enters. */
+        int y0 = menu_y + 70;
+        for (int f = 1; f <= 5; f++) {
+            double t = f / 5.0;
+            double e = t * t;             /* ease-in: slow start, quick end */
+            XMoveResizeWindow(dpy, win_menu, menu_x,
+                              menu_y + (int)((y0 - menu_y) * e),
+                              MENU_W, MENU_H);
+            XFlush(dpy);
+            usleep(14000);
+        }
+        XUnmapWindow(dpy, win_menu);
+        XMoveResizeWindow(dpy, win_menu, menu_x, menu_y, MENU_W, MENU_H);
+    }
     menu_visible = 0;
     search_focus = 0;
     menu_tile_idx = -1;
@@ -3672,6 +4527,7 @@ static unsigned long px2(const char *hex) {
 
 static void show_power(void) {
     power_hide();
+    net_hide();                 /* one shell flyout at a time */
     int w = POWER_W, h = POWER_H;
     /* place the flyout to the RIGHT of the Start menu (no overlap at all),
        vertically aligned with the power button */
@@ -3936,7 +4792,265 @@ static void icons_reload(void) {
     desk_dirty = 1;
 }
 
+/* --------------------------------------------------------------- XDND target
+ * Accept files dragged out of Explorer (Qt enables XDND on its views) or any
+ * other XDND source -- file managers, browsers, editors -- and COPY them into
+ * ~/Desktop, where icons_reload()/gen_icons() already render them as desktop
+ * icons. Always a copy: a drop can never move or delete the original.
+ * Protocol: XDND v5 (xdnd.org), as implemented by Qt and GTK. */
+static Window xdnd_src = 0;            /* drag source window, 0 = idle      */
+static Atom   xdnd_type = 0;           /* accepted source type (uri-list)  */
+static Time   xdnd_time = CurrentTime; /* last timestamp seen in the drag  */
+static int    xdnd_ver = 0;            /* negotiated XDND version          */
+static pid_t  xdnd_pid = 0;            /* copy worker, 0 = idle            */
 
+static void xdnd_msg(Window dst, const char *type, long a1, long a2, long a3,
+                     long a4, long a5)
+{
+    XEvent e;
+    memset(&e, 0, sizeof e);
+    e.xclient.type         = ClientMessage;
+    e.xclient.display       = dpy;
+    e.xclient.window        = dst;
+    e.xclient.message_type  = atom(type);
+    e.xclient.format        = 32;
+    e.xclient.data.l[0]     = (long)win_desk;
+    e.xclient.data.l[1]     = a1;
+    e.xclient.data.l[2]     = a2;
+    e.xclient.data.l[3]     = a3;
+    e.xclient.data.l[4]     = a4;
+    e.xclient.data.l[5]     = a5;
+    XSendEvent(dpy, dst, False, NoEventMask, &e);
+    XFlush(dpy);
+}
+
+/* XdndEnter: record the source and which of its offered types we can accept */
+static void xdnd_enter(XClientMessageEvent *ev)
+{
+    xdnd_src  = (Window)ev->data.l[0];
+    xdnd_type = 0;
+    xdnd_ver  = (int)(((unsigned long)ev->data.l[1] >> 24) & 0xff);
+    Atom types[64];
+    int  n = 0;
+    if (ev->data.l[1] & 1) {              /* >3 types -> XdndTypeList */
+        Atom actual = None;
+        int fmt = 0;
+        unsigned long nitems = 0, after = 0;
+        unsigned char *data = NULL;
+        if (XGetWindowProperty(dpy, xdnd_src, atom("XdndTypeList"), 0, 64,
+                               False, XA_ATOM, &actual, &fmt, &nitems, &after,
+                               &data) == Success && data) {
+            if (actual == XA_ATOM && fmt == 32) {
+                long *a = (long *)data;    /* format 32 -> array of longs */
+                for (unsigned long i = 0; i < nitems && n < 64; i++)
+                    types[n++] = (Atom)a[i];
+            }
+            XFree(data);
+        }
+    } else {
+        for (int i = 2; i < 5; i++)
+            if (ev->data.l[i]) types[n++] = (Atom)ev->data.l[i];
+    }
+    Atom want = atom("text/uri-list");
+    for (int i = 0; i < n; i++)
+        if (types[i] == want) { xdnd_type = want; break; }
+}
+
+/* XdndPosition: always answer XdndStatus with XdndActionCopy when we accept,
+ * so the source knows the drop will copy; the whole desktop window is the
+ * valid drop rectangle. */
+static void xdnd_position(XClientMessageEvent *ev)
+{
+    if ((Window)ev->data.l[0] != xdnd_src)
+        xdnd_enter(ev);                   /* source changed mid-drag */
+    xdnd_time = (Time)ev->data.l[3];
+    long flags = xdnd_type ? 1 : 0;
+    long act   = xdnd_type ? (long)atom("XdndActionCopy") : 0;
+    long wh    = ((long)scr_w << 16) | ((long)scr_h & 0xffff);
+    /* XdndStatus field layout cross-checked against Qt (qxcbdrag.cpp) and
+     * GTK (gdkdnd-x11.c): both sources read the action from l[4] (GTK warns
+     * if action==0 disagrees with flags bit0), the drop rectangle from
+     * l[2]/l[3]; l[5] stays 0. */
+    xdnd_msg(xdnd_src, "XdndStatus", flags, 0, wh, act, 0);
+}
+
+/* XdndDrop: pull the data over via a selection transfer */
+static void xdnd_drop(XClientMessageEvent *ev)
+{
+    if (!xdnd_src) return;
+    Time ts = xdnd_time;
+    if (xdnd_ver >= 5 && ev->data.l[2])
+        ts = (Time)ev->data.l[2];         /* v5 carries the timestamp */
+    if (!xdnd_type) {                     /* we never accepted this drag */
+        if (xdnd_ver >= 5)
+            xdnd_msg(xdnd_src, "XdndFinished", 0, 0, 0, 0, 0);
+        xdnd_src = 0;
+        return;
+    }
+    XConvertSelection(dpy, atom("XdndSelection"), xdnd_type,
+                      atom("_ELEVENDE_XDND_DATA"), win_desk, ts);
+}
+
+static void xdnd_finish(void)
+{
+    if (xdnd_src && xdnd_ver >= 5)
+        xdnd_msg(xdnd_src, "XdndFinished", 1, (long)atom("XdndActionCopy"),
+                 0, 0, 0);
+    xdnd_src  = 0;
+    xdnd_type = 0;
+}
+
+/* percent-decode one file:// URI; 0 = success */
+static int xdnd_uri_path(const char *uri, size_t len, char *out, size_t cap)
+{
+    if (len < 7 || strncmp(uri, "file://", 7)) return -1;
+    uri += 7;
+    len -= 7;
+    if (len > 10 && !strncmp(uri, "localhost/", 10)) { uri += 9; len -= 9; }
+    size_t o = 0;
+    for (size_t i = 0; i < len && o + 1 < cap; i++) {
+        unsigned char c = (unsigned char)uri[i];
+        if (c == '%' && i + 2 < len &&
+            isxdigit((unsigned char)uri[i + 1]) &&
+            isxdigit((unsigned char)uri[i + 2])) {
+            char hx[3] = { uri[i + 1], uri[i + 2], 0 };
+            c = (unsigned char)strtol(hx, NULL, 16);
+            i += 2;
+        }
+        if (!c) break;
+        out[o++] = (char)c;
+    }
+    out[o] = 0;
+    return o ? 0 : -1;
+}
+
+/* unique destination path in dir: "a.txt" -> "a (1).txt" (Windows style) */
+static int xdnd_unique_dest(const char *dir, const char *name, char *out,
+                            size_t cap)
+{
+    const char *dot = strrchr(name, '.');
+    char base[400], ext[64];
+    if (dot && dot != name && (size_t)(dot - name) < sizeof base) {
+        size_t bl = (size_t)(dot - name);
+        memcpy(base, name, bl);
+        base[bl] = 0;
+        snprintf(ext, sizeof ext, "%s", dot);
+    } else {
+        snprintf(base, sizeof base, "%s", name);
+        ext[0] = 0;
+    }
+    for (int i = 0; i < 1000; i++) {
+        if (i == 0) snprintf(out, cap, "%s/%s%s", dir, base, ext);
+        else        snprintf(out, cap, "%s/%s (%d)%s", dir, base, i, ext);
+        if (access(out, F_OK) != 0) return 0;
+    }
+    return -1;
+}
+
+static int cp_file(const char *src, const char *dst)
+{
+    struct stat st;
+    if (stat(src, &st) != 0 || !S_ISREG(st.st_mode)) return -1;
+    int in = open(src, O_RDONLY);
+    if (in < 0) return -1;
+    int out = open(dst, O_WRONLY | O_CREAT | O_EXCL, st.st_mode & 07777);
+    if (out < 0) { close(in); return -1; }
+    static char buf[65536];
+    ssize_t r;
+    int ok = 1;
+    while ((r = read(in, buf, sizeof buf)) > 0) {
+        ssize_t off = 0;
+        while (off < r) {
+            ssize_t w = write(out, buf + off, (size_t)(r - off));
+            if (w <= 0) { ok = 0; break; }
+            off += w;
+        }
+        if (!ok) break;
+    }
+    if (r < 0) ok = 0;
+    close(in);
+    close(out);
+    if (!ok) { unlink(dst); return -1; }
+    return 0;
+}
+
+/* recursive copy (directories included); partial failures just skip the
+ * offending entry so one unreadable file does not lose the whole drop */
+static int cp_tree(const char *src, const char *dst, int depth)
+{
+    struct stat st;
+    if (depth > 32 || stat(src, &st) != 0) return -1;
+    if (!S_ISDIR(st.st_mode)) return cp_file(src, dst);
+    if (mkdir(dst, (st.st_mode & 07777) | 0700) != 0) return -1;
+    DIR *d = opendir(src);
+    if (!d) return -1;
+    int ok = 1;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (!de->d_name[0] || de->d_name[0] == '.') continue;
+        char s[1024], t[1024];
+        snprintf(s, sizeof s, "%s/%s", src, de->d_name);
+        snprintf(t, sizeof t, "%s/%s", dst, de->d_name);
+        if (cp_tree(s, t, depth + 1) != 0) ok = 0;
+    }
+    closedir(d);
+    return ok ? 0 : -1;
+}
+
+/* Parse the text/uri-list payload and hand the copying to a child process so
+ * a multi-GB folder never freezes the shell's event loop. The parent polls
+ * xdnd_pid in the main loop and reloads the desktop icons when it exits. */
+static void xdnd_copy_uris(const char *data, size_t len)
+{
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "elevende-shell: XDND fork failed\n");
+        return;
+    }
+    if (pid > 0) { xdnd_pid = pid; return; }
+    /* child: copy files, then vanish (SIGCHLD is ignored -> auto-reaped) */
+    mkdir(desk_dir(), 0755);
+    const char *p = data, *end = data + len;
+    while (p < end) {
+        const char *nl = memchr(p, '\n', (size_t)(end - p));
+        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        while (ll && (p[ll - 1] == '\r' || p[ll - 1] == '\n')) ll--;
+        char path[1024];
+        if (xdnd_uri_path(p, ll, path, sizeof path) == 0) {
+            const char *base = strrchr(path, '/');
+            base = base ? base + 1 : path;
+            char dest[1400];
+            if (base[0] &&
+                xdnd_unique_dest(desk_dir(), base, dest, sizeof dest) == 0)
+                cp_tree(path, dest, 0);
+        }
+        if (!nl) break;
+        p = nl + 1;
+    }
+    _exit(0);
+}
+
+/* SelectionNotify: the source handed us the uri list -> start the copy */
+static void xdnd_receive(XSelectionEvent *ev)
+{
+    if (ev->property == None || !xdnd_src) { xdnd_finish(); return; }
+    Atom actual = None;
+    int fmt = 0;
+    unsigned long nitems = 0, after = 0;
+    unsigned char *data = NULL;
+    if (XGetWindowProperty(dpy, win_desk, atom("_ELEVENDE_XDND_DATA"), 0,
+                           65536, False, AnyPropertyType, &actual, &fmt,
+                           &nitems, &after, &data) != Success || !data) {
+        xdnd_finish();
+        return;
+    }
+    if (fmt == 8 && nitems)
+        xdnd_copy_uris((const char *)data, (size_t)nitems);
+    XFree(data);
+    XDeleteProperty(dpy, win_desk, atom("_ELEVENDE_XDND_DATA"));
+    xdnd_finish();                        /* data is ours now: release the
+                                             source's drag immediately */
+}
 
 static int is_image_file(const char *path) {
     const char *dot = strrchr(path, '.');
@@ -4119,6 +5233,7 @@ static void menu_refresh(void) {
 
 static void menu_show(void) {
     if (menu_visible) { draw_menu(); return; }
+    net_hide();                 /* one shell flyout at a time */
     cal_hide();
     search_hide();
     dm_hide();
@@ -4174,7 +5289,10 @@ static void draw_menu_list(const char *header, RRect *lr) {
     for (int r = 0; r < nvis; r++) {
         int ai = res_idx[apps_scroll + r];
         int ry = lr->y + r * ROW_H;
-        int sel = (sel_row == r);
+        /* sel_row is the ABSOLUTE row in the filtered list while r is the
+         * visible row inside the scrolled window: comparing them directly
+         * made the keyboard highlight vanish whenever the list scrolled. */
+        int sel = (sel_row == apps_scroll + r);
         int hov = (menu_hover_row == r);
         const Color *rowc = sel ? &cc_sel : (hov ? &cc_hoverc : &cc_menu);
         if (sel || hov)
@@ -4312,6 +5430,166 @@ static void applist_ctx_cb(int idx, void *ud) {
     }
 }
 
+/* ---------------------------------------------------------- touch gestures */
+/* Windows 11 touch model, mirrored on X11 (no native touch events for our
+ * override-redirect surfaces, so it is built from press/motion/release):
+ *   - a Button1 press records its target and ACTIVATES ON RELEASE, so a tap
+ *     behaves like a mouse click (and a finger jitter cannot fire it);
+ *   - holding still for 500 ms shows the same menu a right-click would;
+ *   - moving past DRAG_THRESHOLD turns the press into a drag: desktop icons
+ *     drag as before, while Start-menu/search lists scroll with the finger. */
+static int search_rows_vis(void);
+
+static void gp_reset(void) {
+    gp_kind = GP_NONE;
+    gp_win = None;
+    gp_idx = -1;
+    gp_drag = 0;
+    gp_lp = 0;
+}
+
+static void gp_begin(int kind, Window w, int idx, int x, int y) {
+    gp_kind = kind;
+    gp_win = w;
+    gp_idx = idx;
+    gp_x = x;
+    gp_y = y;
+    gp_scroll = apps_scroll;
+    gp_t0 = now_sec();
+    gp_drag = 0;
+    gp_lp = 0;
+}
+
+/* Called from every motion handler for the window that owns the gesture. */
+static void gp_motion(int x, int y) {
+    if (gp_kind == GP_NONE || gp_drag || gp_lp) return;
+    if (x - gp_x <= DRAG_THRESHOLD && gp_x - x <= DRAG_THRESHOLD &&
+        y - gp_y <= DRAG_THRESHOLD && gp_y - y <= DRAG_THRESHOLD) return;
+    gp_drag = 1;
+    if (gp_kind == GP_DESK && dragging_icon) return;   /* icon drag owns it */
+    if (gp_kind == GP_MENU_ROW || gp_kind == GP_SEARCH_ROW) {
+        /* the finger now owns the list: drop hover highlights so a moving
+         * row is never painted as if it were being pointed at */
+        menu_hover_row = -1;
+        menu_tile_idx = -1;
+        menu_power_hover = 0;
+        search_hover_row = -1;
+        if (gp_kind == GP_MENU_ROW && menu_visible) draw_menu();
+        if (gp_kind == GP_SEARCH_ROW && search_visible) draw_search();
+    }
+    if (gp_kind != GP_MENU_ROW && gp_kind != GP_SEARCH_ROW) return;
+    /* Finger-scroll the result list: the row under the finger at press time
+     * stays put while the whole list follows, exactly like a touchscreen. */
+    int vis = (gp_kind == GP_MENU_ROW) ? list_vis : search_rows_vis();
+    if (vis < 1) vis = 1;
+    int maxs = (nres > vis) ? nres - vis : 0;
+    int ns = gp_scroll + (gp_y - y) / ROW_H;
+    if (ns < 0) ns = 0;
+    if (ns > maxs) ns = maxs;
+    if (ns != apps_scroll) {
+        apps_scroll = ns;
+        if (gp_kind == GP_MENU_ROW) draw_menu();
+        else draw_search();
+    }
+}
+
+/* Long-press timer, polled from the main loop (~60 Hz while a button is
+ * down).  Fires the same context menu the right button would. */
+static void gp_tick(void) {
+    if (gp_kind == GP_NONE || gp_drag || gp_lp) return;
+    /* Safety net: a release that never reaches us (grab lost, focus churn)
+     * must not leave a gesture armed that would pop a menu on its own. */
+    {
+        Window rr, cr; int rx, ry, wx, wy; unsigned int m = 0;
+        if (XQueryPointer(dpy, root, &rr, &cr, &rx, &ry, &wx, &wy, &m) &&
+            !(m & Button1Mask)) { gp_reset(); return; }
+    }
+    if (gp_kind == GP_DESK && dragging_icon) { gp_drag = 1; return; }
+    if (now_sec() - gp_t0 < 0.5) return;
+    gp_lp = 1;
+    switch (gp_kind) {
+    case GP_MENU_ROW:
+        if (gp_idx < 0 || gp_idx >= nres || !menu_visible) return;
+        {
+            const char *items[2] = { "打开", "固定到开始菜单" };
+            if (pin_app_pinned(gp_idx)) items[1] = "取消固定";
+            ctx_show(items, 2, menu_x + gp_x, menu_y + gp_y, applist_ctx_cb,
+                     (void *)(long)gp_idx);
+        }
+        return;
+    case GP_MENU_TILE:
+        if (gp_idx < 1 || gp_idx > npin_tiles || !menu_visible) return;
+        pinmenu_show(pin_slot[gp_idx],
+                     menu_x + menu_hot[gp_idx].x,
+                     menu_y + menu_hot[gp_idx].y + menu_hot[gp_idx].h + 8);
+        return;
+    case GP_SEARCH_ROW:
+        if (gp_idx < 0 || gp_idx >= nres || !search_visible) return;
+        {
+            const char *items[2] = { "打开", "固定到开始菜单" };
+            if (pin_app_pinned(gp_idx)) items[1] = "取消固定";
+            ctx_show(items, 2, search_x + gp_x, search_y + gp_y,
+                     applist_ctx_cb, (void *)(long)gp_idx);
+        }
+        return;
+    case GP_TASK:
+        if (gp_idx < 0 || gp_idx >= ntask) return;
+        cal_hide();
+        menu_hide();
+        wm_cancel_move();
+        cancel_repeat = 8;
+        {
+            const char *items[4] = { "还原", "最小化", "最大化", "关闭" };
+            ctx_show(items, 4, gp_x, scr_h - BAR_H + gp_y, task_ctx_cb,
+                     (void *)(long)gp_idx);
+        }
+        return;
+    case GP_DESK:
+        /* empty-space presses never set press_active, so only a real icon
+           drag (which owns the gesture) may block the long-press */
+        if (dragging_icon) return;
+        dm_show(gp_x, gp_y, gp_idx);
+        return;
+    default: return;
+    }
+}
+
+/* Button release: activate the recorded target unless the press was turned
+ * into a drag or already consumed by a long-press menu. */
+static void gp_release(Window w, int x, int y) {
+    if (gp_kind == GP_NONE) return;
+    int kind = gp_kind, idx = gp_idx, drag = gp_drag, lp = gp_lp;
+    gp_reset();
+    if (drag || lp) return;
+    (void)w;
+    switch (kind) {
+    case GP_MENU_ROW:
+        if (menu_visible && idx >= 0 && idx < nres) launch_app(idx);
+        return;
+    case GP_MENU_TILE:
+        if (menu_visible && idx >= 1 && idx <= npin_tiles && menu_cmd[idx]) {
+            launch_cmd(menu_cmd[idx]);
+            menu_hide();
+        }
+        return;
+    case GP_SEARCH_ROW:
+        if (search_visible && idx >= 0 && idx < nres) launch_app(idx);
+        return;
+    case GP_TASK: {
+        int i = bar_task_at(x, y);      /* release position wins (Win11) */
+        if (i < 0) i = idx;
+        if (i < 0 || i >= ntask) return;
+        wm_cancel_move();
+        if (tasks[i].active) XIconifyWindow(dpy, tasks[i].win, scr);
+        else activate_window(tasks[i].win);
+        menu_hide();
+        return;
+    }
+    default:
+        return;
+    }
+}
+
 static void handle_bar_press(int but, int x, int y) {
     if (but == Button3) {                          /* taskbar context menu */
         cal_hide();
@@ -4335,13 +5613,14 @@ static void handle_bar_press(int but, int x, int y) {
     }
     if (in_rect(im_r, x, y)) { im_click(); return; }
     if (in_rect(net_r, x, y)) {
-        /* 使用 SAS 已有的 NetworkManager/iwd WLAN 面板；它会扫描、提示
-           密码并执行真实连接，而不是只显示一个无效的状态图标。 */
+        /* Native Win11-style quick-settings panel (scan / connect / toggle)
+           instead of launching the separate SAS WLAN app. */
         menu_hide();
-        vol_hide();
-        launch_cmd("sas-screen --network");
+        if (net_visible) net_hide();
+        else net_show();
         return;
     }
+    if (net_visible) net_hide();
     if (in_rect(pill_r, x, y)) {
         menu_hide();
         if (but == Button4) { set_volume_pct(vol_level + 5); return; }
@@ -4380,17 +5659,24 @@ static void handle_bar_press(int but, int x, int y) {
     }
 
     int i = bar_task_at(x, y);
-    if (i >= 0) {
-        wm_cancel_move();
-        if (tasks[i].active) XIconifyWindow(dpy, tasks[i].win, scr);
-        else activate_window(tasks[i].win);
-        menu_hide();
+    if (i >= 0 && but == Button1) {
+        /* deferred like a touch tap: activates on release, long-press (or
+           right-click) opens the window menu */
+        gp_begin(GP_TASK, win_bar, i, x, y);
     }
 }
 
 static void handle_menu_press(int but, int x, int y) {
     cal_hide();
+    /* While a search filter is active the result rows are painted straight
+     * over the pinned grid (LIST_TOP_FILTER..LIST_BOTTOM overlaps the PIN_TOP
+     * hot cells), but the pinned tiles themselves are NOT drawn.  Their hot
+     * regions must therefore be skipped while filtering, otherwise a click on
+     * a result row is swallowed by the invisible pinned tile underneath and
+     * launches the wrong app ("click-through"). */
+    int filtering = menu_filt[0] != 0;
     for (int i = 0; i < nmenu_hot; i++) {
+        if (filtering && i >= 1 && i <= npin_tiles) continue;
         if (in_rect(menu_hot[i], x, y)) {
             if (i == 0) {                          /* search pill */
                 if (but == Button3) { menu_hide(); }
@@ -4400,7 +5686,10 @@ static void handle_menu_press(int but, int x, int y) {
                 if (but == Button3)
                     pinmenu_show(pin_slot[i], menu_x + menu_hot[i].x,
                                  menu_y + menu_hot[i].y + menu_hot[i].h + 8);
-                else {
+                else if (but == Button1) {
+                    /* deferred: fires on release, long-press shows the menu */
+                    gp_begin(GP_MENU_TILE, win_menu, i, x, y);
+                } else {
                     launch_cmd(menu_cmd[i]);
                     menu_hide();
                 }
@@ -4423,6 +5712,8 @@ static void handle_menu_press(int but, int x, int y) {
                     items[1] = "取消固定";
                 ctx_show(items, 2, menu_x + x, menu_y + y, applist_ctx_cb,
                          (void *)(long)row);
+            } else if (but == Button1) {
+                gp_begin(GP_MENU_ROW, win_menu, row, x, y);
             } else {
                 launch_app(row);
             }
@@ -4474,8 +5765,13 @@ static void handle_menu_key(const XKeyEvent *ev) {
     }
     case XK_Home:  sel_row = 0; apps_scroll = 0; draw_menu(); return;
     case XK_End:   if (nres) { sel_row = nres-1; apps_scroll = nres > list_vis ? nres - list_vis : 0; } draw_menu(); return;
-    case XK_Page_Up:   sel_row -= list_vis; if (sel_row < 0) sel_row = 0; draw_menu(); return;
-    case XK_Page_Down: if (nres) { sel_row += list_vis; if (sel_row >= nres) sel_row = nres-1; } draw_menu(); return;
+    case XK_Page_Up:   sel_row -= list_vis; if (sel_row < 0) sel_row = 0;
+                       if (sel_row < apps_scroll) apps_scroll = sel_row;
+                       draw_menu(); return;
+    case XK_Page_Down: if (nres) { sel_row += list_vis; if (sel_row >= nres) sel_row = nres-1;
+                       if (sel_row >= apps_scroll + list_vis)
+                           apps_scroll = sel_row - list_vis + 1; }
+                       draw_menu(); return;
     default: break;
     }
 
@@ -4494,6 +5790,7 @@ static void handle_menu_key(const XKeyEvent *ev) {
 
 /* ------------------------------------------------------------- search popup */
 static void search_show(void) {
+    net_hide();                 /* one shell flyout at a time */
     cal_hide();
     power_hide();
     menu_hide();
@@ -4516,6 +5813,7 @@ static void search_show(void) {
 static void search_hide(void) {
     if (search_visible && win_search) XUnmapWindow(dpy, win_search);
     search_visible = 0;
+    gp_reset();          /* no deferred activation for a closed popup */
 }
 
 static void draw_search(void) {
@@ -4546,7 +5844,9 @@ static void draw_search(void) {
     for (int r = 0; r < nvis; r++) {
         int ai = res_idx[apps_scroll + r];
         int ry = lr.y + r * ROW_H;
-        int sel = (sel_row == r);
+        /* absolute sel_row vs visible r: keep them in the same coordinate
+         * space so the keyboard highlight survives scrolling (see menu list) */
+        int sel = (sel_row == apps_scroll + r);
         int hov = (search_hover_row == r);
         const Color *rowc = sel ? &cc_sel : (hov ? &cc_hoverc : &cc_menu);
         if (sel || hov)
@@ -4572,16 +5872,23 @@ static void handle_search_press(int x, int y) {
     int lty = 80, lh = SEARCH_H - 80 - 12;
     if (y >= lty && y < lty + lh && x >= 16 && x < SEARCH_W - 24) {
         int row = (y - lty) / ROW_H + apps_scroll;
-        if (row < nres) launch_app(row);
+        if (row < nres) {
+            /* activate on release, long-press opens the context menu */
+            gp_begin(GP_SEARCH_ROW, win_search, row, x, y);
+        }
         return;
     }
     search_focus = 1;
     draw_search();
 }
 
+/* rows visible in the search result list; must match draw_search's rect */
+static int search_rows_vis(void) { return (SEARCH_H - 80 - 12) / ROW_H; }
+
 static void handle_search_key(const XKeyEvent *ev) {
     KeySym ks = XLookupKeysym((XKeyEvent *)ev, 0);
     int row;
+    int sv = search_rows_vis();
 
     switch (ks) {
     case XK_Escape:
@@ -4593,7 +5900,7 @@ static void handle_search_key(const XKeyEvent *ev) {
         return;
     case XK_Down:
         if (nres > 0) {
-            int nv = (list_vis = SEARCH_H / ROW_H) < nres ? list_vis : nres;
+            int nv = sv < nres ? sv : nres;
             row = (sel_row < 0 ? 0 : sel_row + 1);
             if (row >= nres) row = nres - 1;
             if (row >= apps_scroll + nv) apps_scroll = row - nv + 1;
@@ -4621,11 +5928,19 @@ static void handle_search_key(const XKeyEvent *ev) {
     }
     case XK_Home: sel_row = 0; apps_scroll = 0; draw_search(); return;
     case XK_End:
-        if (nres) { sel_row = nres - 1; apps_scroll = nres > 12 ? nres - 12 : 0; }
+        if (nres) {
+            sel_row = nres - 1;
+            apps_scroll = nres > sv ? nres - sv : 0;
+        }
         draw_search();
         return;
-    case XK_Page_Up:   sel_row -= 12; if (sel_row < 0) sel_row = 0; draw_search(); return;
-    case XK_Page_Down: if (nres) { sel_row += 12; if (sel_row >= nres) sel_row = nres - 1; } draw_search(); return;
+    case XK_Page_Up:   sel_row -= sv; if (sel_row < 0) sel_row = 0;
+                       if (sel_row < apps_scroll) apps_scroll = sel_row;
+                       draw_search(); return;
+    case XK_Page_Down: if (nres) { sel_row += sv; if (sel_row >= nres) sel_row = nres - 1;
+                       if (sel_row >= apps_scroll + sv)
+                           apps_scroll = sel_row - sv + 1; }
+                       draw_search(); return;
     default: break;
     }
 
@@ -4645,6 +5960,7 @@ static void handle_search_key(const XKeyEvent *ev) {
 }
 
 static void handle_root_press(int but, int x, int y) {
+    gp_reset();      /* a new press supersedes any half-finished gesture */
     if (menu_visible && y < scr_h - BAR_H) { menu_hide(); return; }
     if (search_visible && y < scr_h - BAR_H) { search_hide(); return; }
     if (dm_visible) { dm_hide(); if (but != Button1) return; }
@@ -4655,19 +5971,46 @@ static void handle_root_press(int but, int x, int y) {
     if (but == Button3) {                          /* desktop context menu */
         press_active = 0;
         press_icon = -1;
+        dragging_icon = 0;
         dm_show(x, y, icon);
         return;
     }
-    press_active = icon >= 0;
-    press_icon = icon;
-    sel_icon = icon;
-    if (icon >= 0) { sel_anim = 0.0f; sel_anim_act = 1; }   /* pop-in like Start menu */
+    /* Only Button1 selects/drags the desktop (middle click does nothing,
+     * matching Windows). */
+    press_active = (but == Button1 && icon >= 0);
+    press_icon = press_active ? icon : -1;
+    dragging_icon = 0;
+    settle_act = 0;
+    settle_icon = -1;
     press_x0 = x;
     press_y0 = y;
-    if (icon >= 0) { ic_orig_x = ic[icon].x; ic_orig_y = ic[icon].y; }
+    if (but == Button1) {
+        /* long-press (500 ms, no drag) opens the desktop context menu, which
+         * is how touch users right-click; the press still selects/opens on
+         * release as before */
+        gp_begin(GP_DESK, win_desk, icon, x, y);
+    }
+    if (press_active) {
+        if (sel_icon != icon) {
+            /* only re-arm the pop-in when the selection actually CHANGES --
+             * re-clicking the same icon restarted the fade every time and
+             * read as a flicker on every click */
+            sel_icon = icon;
+            sel_anim = 0.0f;
+            sel_anim_act = 1;
+        }
+        ic_orig_x = ic[icon].x;
+        ic_orig_y = ic[icon].y;
+        drag_gx = drag_tx = ic[icon].x;
+        drag_gy = drag_ty = ic[icon].y;
+        drag_occupant = -1;
+    } else if (icon < 0) {
+        sel_icon = -1;                          /* click empty space deselects */
+    }
 }
 
 static void handle_desk_motion(int x, int y) {
+    gp_motion(x, y);              /* turn a held press into a drag past 6px */
     if (!press_active || press_icon < 0) {
         /* Win11-style hover highlight while just moving over the desktop */
         int h = -1;
@@ -4677,33 +6020,90 @@ static void handle_desk_motion(int x, int y) {
         if (h != hover_icon) { hover_icon = h; desk_dirty = 1; }
         return;
     }
-    int nx = ic_orig_x + (x - press_x0);
-    int ny = ic_orig_y + (y - press_y0);
-    /* snap to the icon lattice like Windows "auto arrange to grid" */
-    ic[press_icon].x = ICON_GX + ((nx - ICON_GX + ICON_CSX / 2) / ICON_CSX) * ICON_CSX;
-    ic[press_icon].y = ICON_GY + ((ny - ICON_GY + ICON_CSY / 2) / ICON_CSY) * ICON_CSY;
+    if (!dragging_icon) {
+        /* Explorer/Qt drag threshold: below it a press is still a click, so
+         * pointer jitter can neither teleport the icon nor break double-click */
+        if (abs(x - press_x0) + abs(y - press_y0) < DRAG_THRESHOLD)
+            return;
+        dragging_icon = 1;
+        hover_icon = -1;                    /* hover wash would fight the drag */
+        drag_gx = ic_orig_x;
+        drag_gy = ic_orig_y;
+    }
+    /* The icon floats with the cursor (grab offset preserved) while its
+     * committed cell keeps showing the placeholder until release. */
+    drag_gx = ic_orig_x + (x - press_x0);
+    drag_gy = ic_orig_y + (y - press_y0);
+    /* Landing cell = nearest lattice slot, clamped to the desktop area so an
+     * icon can never end up hidden under the taskbar. */
+    int tx = ICON_GX + ((drag_gx - ICON_GX + ICON_CSX / 2) / ICON_CSX) * ICON_CSX;
+    int ty = ICON_GY + ((drag_gy - ICON_GY + ICON_CSY / 2) / ICON_CSY) * ICON_CSY;
+    int maxtx = ICON_GX + ((scr_w - 8 - ICON_W - ICON_GX) / ICON_CSX) * ICON_CSX;
+    int maxty = ICON_GY +
+                ((scr_h - BAR_H - 8 - ICON_H - ICON_GY) / ICON_CSY) * ICON_CSY;
+    if (maxtx < ICON_GX) maxtx = ICON_GX;
+    if (maxty < ICON_GY) maxty = ICON_GY;
+    if (tx < ICON_GX) tx = ICON_GX;
+    if (ty < ICON_GY) ty = ICON_GY;
+    if (tx > maxtx) tx = maxtx;
+    if (ty > maxty) ty = maxty;
+    if (tx != drag_tx || ty != drag_ty) {
+        drag_tx = tx;
+        drag_ty = ty;
+        drag_occupant = -1;                 /* who already lives in that cell */
+        for (int i = 0; i < nic; i++)
+            if (i != press_icon && ic[i].x == tx && ic[i].y == ty) {
+                drag_occupant = i;
+                break;
+            }
+    }
     desk_dirty = 1;
 }
 
 static void handle_desk_release(int x, int y) {
-    if (!press_active) { press_active = 0; return; }
+    (void)x; (void)y;   /* landing state comes from the last motion event */
+    if (!press_active) { press_active = 0; dragging_icon = 0; gp_reset(); return; }
     press_active = 0;
-    if (press_icon < 0) return;
-    int moved = abs(x - press_x0) + abs(y - press_y0);
-    if (moved >= 8) {
-        icons_pos_save();                /* remember the new grid position */
-        press_icon = -1;
+    /* A long-press already opened the context menu: the matching release
+     * must not also open the file / toggle the selection. */
+    if (gp_lp) { dragging_icon = 0; press_icon = -1; gp_reset(); return; }
+    if (press_icon < 0) { dragging_icon = 0; gp_reset(); return; }
+    int icon = press_icon;
+    press_icon = -1;
+    if (dragging_icon) {
+        dragging_icon = 0;
+        /* Land: swap with whatever already sits in the target cell so two
+         * icons can never overlap (an overlapped icon used to be
+         * unreachable because hit-testing picked the first one). */
+        if (drag_occupant >= 0 && drag_occupant < nic) {
+            ic[drag_occupant].x = ic_orig_x;
+            ic[drag_occupant].y = ic_orig_y;
+        }
+        drag_occupant = -1;
+        int changed = (ic[icon].x != drag_tx || ic[icon].y != drag_ty);
+        ic[icon].x = drag_tx;
+        ic[icon].y = drag_ty;
+        if (changed)
+            icons_pos_save();               /* remember the new grid position */
+        /* Glide from where the cursor let go into the landing cell. */
+        settle_icon = icon;
+        settle_fx = drag_gx;
+        settle_fy = drag_gy;
+        settle_t = 0.0f;
+        settle_act = 1;
+        desk_dirty = 1;
         return;
     }
+    /* Plain click: jitter under the threshold still counts as a click, so an
+     * unsteady pointer can no longer break double-clicks (Win11 feel). */
     double t = now_sec();
-    if (press_icon == last_click_icon && t - last_click < 0.5) {
-        open_path(ic[press_icon].path);
+    if (icon == last_click_icon && t - last_click < 0.5) {
+        open_path(ic[icon].path);
         last_click_icon = -1;
     } else {
-        last_click_icon = press_icon;
+        last_click_icon = icon;
         last_click = t;
     }
-    press_icon = -1;
 }
 
 /* ----------------------------------------------------------------- main */
@@ -4731,7 +6131,11 @@ static void shell_reflow(int nw, int nh) {
     clock_r = (RRect){ scr_w - 9 - 86, 0, 82, BAR_H };
     im_r = (RRect){ clock_r.x - 4 - 36, (BAR_H - 36) / 2, 36, 36 };
     pill_r = (RRect){ im_r.x - 4 - 106, (BAR_H - 36) / 2, 106, 36 };
-    net_r = (RRect){ pill_r.x + 56, pill_r.y, 26, pill_r.h };
+    /* The network hit region must sit ON the network pictogram (drawn at
+       pill_r.x + 5, 24px slot). The old offset (+56) landed on the battery
+       icon, so clicking the WiFi glyph did nothing while the battery opened
+       the WLAN panel. */
+    net_r = (RRect){ pill_r.x + 5, pill_r.y, 24, pill_r.h };
     menu_hide();
     search_hide();
     cal_hide();
@@ -4784,6 +6188,7 @@ int main(void) {
     cc_hoverc  = make_color("#e4f1fc");
     cc_sel     = make_color("#cfe7fb");
     cc_selwash = make_color("#e7f3fc");
+    cc_track   = make_color("#c8c8c8");    /* Wi-Fi toggle track (off state) */
     cc_logo1   = make_color("#0078d4");
     cc_logo2   = make_color("#00a4ef");
     cc_logo3   = make_color("#f2a53c");
@@ -4827,7 +6232,7 @@ int main(void) {
     clock_r  = (RRect){ scr_w - 9 - 86, 0, 82, BAR_H };
     im_r     = (RRect){ clock_r.x - 4 - 36, (BAR_H - 36) / 2, 36, 36 };
     pill_r   = (RRect){ im_r.x - 4 - 106, (BAR_H - 36) / 2, 106, 36 };
-    net_r    = (RRect){ pill_r.x + 56, pill_r.y, 26, pill_r.h };
+    net_r    = (RRect){ pill_r.x + 5, pill_r.y, 24, pill_r.h };
 
     win_menu = mk_owindow(0, 0, MENU_W, MENU_H);
     xd_menu  = XftDrawCreate(dpy, win_menu, vis, cmap);
@@ -4914,6 +6319,7 @@ int main(void) {
                 else if (ev.xexpose.window == win_search) draw_search();
                 else if (ev.xexpose.window == win_cal) draw_cal();
                 else if (ev.xexpose.window == win_vol) draw_vol_flyout();
+                else if (ev.xexpose.window == win_net) draw_net();
                 break;
             case ConfigureNotify:
                 if (ev.xconfigure.window == root &&
@@ -4936,7 +6342,23 @@ int main(void) {
                     wall_ok = 0;
                     wallpaper_init();
                     desk_dirty = 1;
-                }
+                } else if (ev.xclient.message_type == atom("XdndEnter"))
+                    xdnd_enter(&ev.xclient);
+                else if (ev.xclient.message_type == atom("XdndPosition"))
+                    xdnd_position(&ev.xclient);
+                else if (ev.xclient.message_type == atom("XdndLeave")) {
+                    xdnd_src = 0;
+                    xdnd_type = 0;
+                } else if (ev.xclient.message_type == atom("XdndDrop"))
+                    xdnd_drop(&ev.xclient);
+                break;
+            case SelectionNotify:
+                /* only our own XConvertSelection (the XDND data transfer)
+                 * produces this event */
+                if (ev.xselection.property != None)
+                    xdnd_receive(&ev.xselection);
+                else if (xdnd_src)
+                    xdnd_finish();        /* source refused the conversion */
                 break;
             case MapNotify:
                 /* 外部窗口映射只由 Openbox 负责；Shell 不改变任何输入状态。 */
@@ -4960,13 +6382,21 @@ int main(void) {
                     dirty = 1;
                     if (ch) { act_changed = 1; cancel_repeat = 12; }
                 } else if (ev.xproperty.atom == atom("_NET_WM_ICON") ||
-                           ev.xproperty.atom == atom("WM_CLASS") ||
-                           ev.xproperty.atom == atom("_NET_WM_NAME") ||
-                           ev.xproperty.atom == atom("WM_NAME")) {
-                    /* The task remains, but its cached pixmap is stale. */
-                    icache_clear();
+                           ev.xproperty.atom == atom("WM_CLASS")) {
+                    /* Only THIS window's cached icon is stale. Evict by the
+                       "W<id>@" key prefix instead of wiping the whole cache:
+                       a full clear re-decoded every icon and made the taskbar
+                       flicker/blank on each icon update. */
+                    char kprefix[32];
+                    snprintf(kprefix, sizeof kprefix, "W%lu@",
+                             (unsigned long)ev.xproperty.window);
+                    icache_evict_prefix(kprefix);
                     dirty = 1;
                 }
+                /* WM_NAME / _NET_WM_NAME changes only affect the title: the
+                   taskbar draws no titles, so they need no icon eviction and
+                   no repaint (the old full icache_clear() here was another
+                   flicker source -- browsers update titles every second). */
                 break;
             case DestroyNotify:
                 for (int i = 0; i < ntray; i++)
@@ -4990,6 +6420,7 @@ int main(void) {
                             tray_remove(ev.xreparent.window);
                 break;
             case ButtonPress:
+                gp_reset();   /* a new press supersedes any pending gesture */
                 /* while the power flyout is up, clicking the menu must only
                    close the flyout -- never fall through and open an app */
                 if (power_visible && ev.xbutton.window == win_menu) {
@@ -4998,6 +6429,9 @@ int main(void) {
                 }
                 if (power_visible && ev.xbutton.window != win_power)
                     power_hide();
+                if (net_visible && ev.xbutton.window != win_net &&
+                    ev.xbutton.window != win_bar)
+                    net_hide();          /* quick-settings closes on outside tap */
                 if (ctx_visible && ev.xbutton.window != win_ctx) {
                     ctx_hide();
                     break;   /* modal menu: the dismiss click must NOT fall through */
@@ -5046,8 +6480,27 @@ int main(void) {
                     handle_power_press(ev.xbutton.x, ev.xbutton.y);
                     break;
                 }
+                if (ev.xbutton.window == win_net) {
+                    handle_net_press((int)ev.xbutton.button,
+                                     ev.xbutton.x, ev.xbutton.y);
+                    dirty = 1;
+                    break;
+                }
                 if (ev.xbutton.window == win_search) {
-                    handle_search_press(ev.xbutton.x, ev.xbutton.y);
+                    /* Only Button1 interacts with the result list: the old
+                     * handler ignored the button field entirely, so a wheel
+                     * tick or a right-click over a row LAUNCHED the app. */
+                    if (ev.xbutton.button == Button4) {          /* wheel up */
+                        if (apps_scroll > 0) { apps_scroll--; draw_search(); }
+                    } else if (ev.xbutton.button == Button5) {   /* wheel down */
+                        if (apps_scroll + search_rows_vis() < nres) {
+                            apps_scroll++; draw_search();
+                        }
+                    } else if (ev.xbutton.button == Button3) {
+                        search_hide();
+                    } else if (ev.xbutton.button == Button1) {
+                        handle_search_press(ev.xbutton.x, ev.xbutton.y);
+                    }
                     dirty = 1;
                     break;
                 }
@@ -5074,11 +6527,28 @@ int main(void) {
                 break;
             case ButtonRelease:
                 if (ev.xbutton.window == win_vol) { vol_drag = 0; break; }
+                /* An icon press holds the implicit pointer grab, but be
+                 * defensive: any release ends a desktop press/drag even if
+                 * the event shows up for another window. */
+                if (press_active || dragging_icon) {
+                    handle_desk_release(ev.xbutton.x, ev.xbutton.y);
+                    gp_reset();
+                    break;
+                }
+                /* Touch-style deferred activation fires on release. */
+                if (gp_kind != GP_NONE) {
+                    gp_release(ev.xbutton.window, ev.xbutton.x, ev.xbutton.y);
+                    break;
+                }
                 if (ev.xbutton.window == win_bar) break;   /* consume, no leak */
                 if (ev.xbutton.window == win_desk)
                     handle_desk_release(ev.xbutton.x, ev.xbutton.y);
                 break;
             case KeyPress:
+                if (ev.xkey.window == win_net && net_visible) {
+                    handle_net_key(&ev.xkey);
+                    break;
+                }
                 if (ev.xkey.window == win_power && power_visible) {
                     if (XLookupKeysym(&ev.xkey, 0) == XK_Escape) power_hide();
                     break;
@@ -5095,6 +6565,11 @@ int main(void) {
                     if (XLookupKeysym(&ev.xkey, 0) == XK_Escape) dm_hide();
                     break;
                 }
+                if (net_visible && ev.xkey.window != win_net &&
+                    XLookupKeysym(&ev.xkey, 0) == XK_Escape) {
+                    net_hide();
+                    break;
+                }
                 if (ev.xkey.window == win_menu || menu_visible)
                     handle_menu_key(&ev.xkey);
                 else if (ev.xkey.window == win_search || search_visible) {
@@ -5108,11 +6583,16 @@ int main(void) {
                     handle_desk_motion(ev.xmotion.x, ev.xmotion.y);
                     break;
                 }
+                if (ev.xmotion.window == win_net) {
+                    handle_net_motion(ev.xmotion.x, ev.xmotion.y);
+                    break;
+                }
                 if (ev.xmotion.window == win_vol) {
                     handle_vol_motion(ev.xmotion.x, ev.xmotion.y);
                     break;
                 }
                 if (ev.xmotion.window == win_bar) {
+                    gp_motion(ev.xmotion.x, ev.xmotion.y);
                     int h = bar_task_at(ev.xmotion.x, ev.xmotion.y);
                     if (h != bar_hover) { bar_hover = h; dirty = 1; }
                     int hp = in_rect(start_r, ev.xmotion.x, ev.xmotion.y) ||
@@ -5121,14 +6601,19 @@ int main(void) {
                     pmx = ev.xmotion.x; pmy = ev.xmotion.y;
                 } else if (ev.xmotion.window == win_menu) {
                     pmx = ev.xmotion.x; pmy = ev.xmotion.y;
+                    gp_motion(ev.xmotion.x, ev.xmotion.y);
+                    if (gp_drag) break;   /* finger-scrolling: no hover */
                     RRect lr = cur_list_rect();
                     int r = -1;
                     if (ev.xmotion.y >= lr.y && ev.xmotion.y < lr.y + lr.h)
                         r = (ev.xmotion.y - lr.y) / ROW_H;
                     int tidx = -1;
-                    for (int i = 1; i <= npin_tiles; i++)
-                        if (in_rect(menu_hot[i], ev.xmotion.x, ev.xmotion.y))
-                            { tidx = i; break; }
+                    /* pinned tiles are hidden while filtering: never let them
+                     * capture hover (the result rows live in the same space) */
+                    if (!menu_filt[0])
+                        for (int i = 1; i <= npin_tiles; i++)
+                            if (in_rect(menu_hot[i], ev.xmotion.x, ev.xmotion.y))
+                                { tidx = i; break; }
                     int ph = in_rect(menu_hot[1 + npin_tiles],
                                      ev.xmotion.x, ev.xmotion.y);
                     int changed = 0;
@@ -5148,6 +6633,8 @@ int main(void) {
                     }
                     if (changed) draw_menu();
                 } else if (ev.xmotion.window == win_search) {
+                    gp_motion(ev.xmotion.x, ev.xmotion.y);
+                    if (gp_drag) { pmx = ev.xmotion.x; pmy = ev.xmotion.y; break; }
                     RRect lr = { 24, 80, SEARCH_W - 48, SEARCH_H - 80 - 12 };
                     int r = -1;
                     if (ev.xmotion.y >= lr.y && ev.xmotion.y < lr.y + lr.h)
@@ -5184,6 +6671,12 @@ int main(void) {
                 }
                 break;
             case LeaveNotify:
+                /* Only real pointer crossings clear hover state. Grab/ungrab
+                 * crossings (NotifyGrab/NotifyUngrab) fire around every
+                 * implicit pointer grab -- i.e. on every click -- and used to
+                 * clear the desktop hover mid-click, causing an extra repaint
+                 * (flicker) on each icon click. */
+                if (ev.xcrossing.mode != NotifyNormal) break;
                 if (ev.xcrossing.window == win_bar &&
                     (bar_hover != -1 || bar_pill_hover)) {
                     bar_hover = -1; bar_pill_hover = -1; dirty = 1;
@@ -5232,6 +6725,8 @@ int main(void) {
                         if ((menu_visible || search_visible || ctx_visible ||
                              pinm_visible) && !pointer_over_own_ui())
                             menu_hide();     /* hides power/pinm/ctx too */
+                        if (net_visible && !pointer_over_own_ui())
+                            net_hide();      /* quick-settings panel */
                     }
                     XFreeEventData(dpy, ck);
                 }
@@ -5275,6 +6770,17 @@ int main(void) {
             act_changed = 1;
         }
 
+        /* XDND drop worker finished copying into ~/Desktop: rescan so the
+         * new files appear as icons (SIGCHLD is ignored, so the process is
+         * already reaped and kill() reports it gone) */
+        if (xdnd_pid > 0 && kill(xdnd_pid, 0) != 0) {
+            xdnd_pid = 0;
+            icons_reload();
+        }
+
+        /* nmcli child finished (scan / connect / radio toggle) */
+        net_poll();
+
         /* 不在后台注入鼠标释放或反复发送 moveresize-cancel。旧的“幽灵
            拖动防御”会与 Openbox 的真实拖动竞争，导致标题栏、窗口控制和
            应用按钮看似有动画却无法点击。 */
@@ -5298,6 +6804,12 @@ int main(void) {
         if (sel_anim_act) {
             sel_anim += 0.28f;
             if (sel_anim >= 1.0f) { sel_anim = 1.0f; sel_anim_act = 0; }
+            desk_dirty = 1;
+        }
+
+        if (settle_act) {                    /* icon gliding into its cell */
+            settle_t += 0.2f;
+            if (settle_t >= 1.0f) { settle_t = 1.0f; settle_act = 0; }
             desk_dirty = 1;
         }
 
@@ -5378,6 +6890,10 @@ int main(void) {
     }
             last_poll = now;
         }
+        /* Fullscreen auto-hide: hide the taskbar while the active client is
+           fullscreen and reveal it on a bottom-edge sweep. Polled every pass
+           (select() idles at 150 ms, so the reveal is at most ~150 ms late). */
+        bar_fullscreen_update();
         int minute = (int)(now / 60);
         if (dirty || bar_dirty || minute != last_min) {
             draw_taskbar();
@@ -5404,7 +6920,11 @@ int main(void) {
         if (dirty) dirty = 0;
         XFlush(dpy);
 
-        struct timeval tv = { 0, (press_active || tile_anim_act || sel_anim_act) ? 16000 : 150000 };
+        gp_tick();                       /* long-press -> context menu */
+        struct timeval tv = { 0, (press_active || tile_anim_act || sel_anim_act ||
+                                  settle_act || gp_kind != GP_NONE ||
+                                  bar_hidden)
+                                  ? 16000 : 150000 };
         fd_set fds;
         FD_ZERO(&fds);
         FD_SET(ConnectionNumber(dpy), &fds);

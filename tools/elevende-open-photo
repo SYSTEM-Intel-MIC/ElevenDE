@@ -1,0 +1,50 @@
+#!/bin/sh
+# ElevenDE "Photos" launcher (3.5.1).
+#
+# The bundled elevende-photos application was removed; the start-menu entry
+# now maps to the SYSTEM default photo viewer. Invoked from photos.desktop
+# as `elevende-open-photo [%F...]`; it also tolerates a literal "%F"
+# argument, which elevende-shell's gtk-launch-less fallback passes through
+# without expanding the field code.
+
+# With file arguments just open them through the default handler (MIME
+# chain in mimeapps.list -> the distro's image viewer).
+have_files=0
+for a in "$@"; do
+    if [ "$a" != "%F" ]; then
+        have_files=1
+        break
+    fi
+done
+if [ "$have_files" = 1 ]; then
+    rc=0
+    for f in "$@"; do
+        [ "$f" = "%F" ] && continue
+        xdg-open "$f" || rc=1
+    done
+    exit $rc
+fi
+
+# No files: resolve the system default viewer for images and start it.
+# gtk-launch returns immediately after launching, so a working default
+# handler short-circuits the fallback chain below.
+app=$(xdg-mime query default image/png 2>/dev/null)
+# Never chain back into ourselves: a stale user mimeapps.list can still
+# name the removed desktop file (install.sh strips it on upgrade, but be
+# defensive).
+case "$app" in
+    photos.desktop|elevende-photos.desktop) app="" ;;
+esac
+app=${app%.desktop}
+if [ -n "$app" ] && command -v gtk-launch >/dev/null 2>&1; then
+    gtk-launch "$app" && exit 0
+fi
+
+# System default unavailable or broken: try the viewers commonly shipped
+# by Debian-family distributions, first one installed wins.
+for v in eog loupe eom xviewer gpicview ristretto; do
+    if command -v "$v" >/dev/null 2>&1; then
+        exec "$v"
+    fi
+done
+exit 1

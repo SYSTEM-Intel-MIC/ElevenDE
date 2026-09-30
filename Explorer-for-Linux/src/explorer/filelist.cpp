@@ -21,6 +21,7 @@
 #include <QLinearGradient>
 #include <QListView>
 #include <QMenu>
+#include <QMimeData>
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
@@ -33,6 +34,8 @@
 #include <QSortFilterProxyModel>
 #include <QStackedWidget>
 #include <QStorageInfo>
+#include <QTimer>
+#include <QTouchEvent>
 #include <QTreeView>
 #include <QUrl>
 #include <QVariant>
@@ -255,6 +258,46 @@ static QIcon packagedFileIcon(const QFileInfo &fi)
     return packagedIcon(QStringLiteral("text-x-generic"), QStringLiteral("mimetypes"));
 }
 
+/* --- drop INTO Explorer (3.5.1) ------------------------------------------
+ * Recursive copy used by drops: QFile::copy only handles plain files, and a
+ * dropped folder must arrive with its whole tree.  Symlinks are skipped on
+ * purpose -- following them can loop forever. */
+static bool copyPathRec(const QString &src, const QString &dst)
+{
+    const QFileInfo si(src);
+    if (si.isSymLink())
+        return true;                       /* links are skipped, not an error */
+    if (si.isDir()) {
+        if (!QDir().mkpath(dst))
+            return false;
+        const QFileInfoList entries =
+            QDir(src).entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot |
+                                    QDir::Hidden | QDir::System);
+        for (const QFileInfo &e : entries)
+            if (!copyPathRec(e.filePath(),
+                             dst + QLatin1Char('/') + e.fileName()))
+                return false;
+        return true;
+    }
+    return QFile::copy(src, dst);
+}
+
+/* Windows-style clash naming: "report.pdf" -> "report (2).pdf". */
+static QString uniquePathForCopy(const QString &dir, const QString &name)
+{
+    QString base = name, ext;
+    const int dot = name.lastIndexOf(QLatin1Char('.'));
+    if (dot > 0) {                         /* keep extension, ignore dotfiles */
+        base = name.left(dot);
+        ext = name.mid(dot);
+    }
+    QString cand = dir + QLatin1Char('/') + name;
+    for (int i = 2; QFileInfo::exists(cand); ++i)
+        cand = dir + QLatin1Char('/') + base +
+               QString::fromLatin1(" (%1)").arg(i) + ext;
+    return cand;
+}
+
 class FileList::Model : public QFileSystemModel
 {
 public:
@@ -288,6 +331,106 @@ public:
             return isDir(index) ? QVariant(fm) : QVariant(fl);
         }
         return QFileSystemModel::data(index, role);
+    }
+
+    /* --- drag source (3.5.1): files can be dragged OUT of Explorer ---------
+     * Qt turns a view drag into an XDND drag on X11, so anything drop-capable
+     * (the ElevenDE desktop shell, other file managers, browsers, editors)
+     * receives the selection as text/uri-list. The mime payload is built here
+     * from the file paths so it never depends on what the base class
+     * serializes; setReadOnly(true) only disables drops, not drags. */
+    Qt::ItemFlags flags(const QModelIndex &index) const override
+    {
+        Qt::ItemFlags f = QFileSystemModel::flags(index);
+        if (index.isValid()) {
+            f |= Qt::ItemIsDragEnabled;
+            /* Folder items -- including the view's root directory, which is
+             * what QAbstractItemView asks about for background drops --
+             * receive drops.  Plain files stay drop-disabled so the view
+             * falls back to their containing folder (Above/Below item).
+             * The model itself remains read-only: no rename/delete path is
+             * opened by this. */
+            if (isDir(index))
+                f |= Qt::ItemIsDropEnabled;
+        }
+        return f;
+    }
+
+    /* --- drop INTO Explorer (3.5.1): drag files between two Explorer
+     * windows, or from the desktop shell / any XDND source into Explorer.
+     * QFileSystemModel::dropMimeData refuses to work while the model is
+     * read-only, so drops are handled here instead of toggling read-only.
+     * Semantics are strictly COPY: the source is never moved or removed,
+     * clashes get a " (2)" suffix like Windows, and dropping files onto the
+     * folder they already live in is accepted as a no-op (prevents phantom
+     * duplicates from an accidental same-window drag).  The copy runs
+     * synchronously, exactly like Qt's own file-manager drops. */
+    bool dropMimeData(const QMimeData *data, Qt::DropAction action,
+                      int row, int column, const QModelIndex &parent) override
+    {
+        Q_UNUSED(action)
+        Q_UNUSED(row)
+        Q_UNUSED(column)
+        if (!data || !data->hasUrls() || !parent.isValid())
+            return false;
+        const QFileInfo tfi(filePath(parent));
+        if (!tfi.isDir())
+            return false;
+        const QString targetDir = tfi.absoluteFilePath();
+        bool sawLocal = false;
+        const QList<QUrl> urls = data->urls();
+        for (const QUrl &u : urls) {
+            if (!u.isLocalFile())
+                continue;
+            const QString src = u.toLocalFile();
+            if (src.isEmpty())
+                continue;
+            const QFileInfo sfi(src);
+            if (!sfi.exists() || sfi.isSymLink())
+                continue;
+            sawLocal = true;
+            const QString srcDir = sfi.absolutePath();
+            if (srcDir == targetDir)
+                continue;                  /* already lives here: no-op */
+            if (sfi.isDir() && (targetDir + QLatin1Char('/'))
+                                   .startsWith(srcDir + QLatin1Char('/')))
+                continue;                  /* never copy a folder into itself */
+            const QString dst = uniquePathForCopy(targetDir, sfi.fileName());
+            if (sfi.isDir())
+                copyPathRec(src, dst);
+            else
+                QFile::copy(src, dst);
+        }
+        return sawLocal;
+    }
+
+    QMimeData *mimeData(const QModelIndexList &indexes) const override
+    {
+        auto *md = new QMimeData;
+        QList<QUrl> urls;
+        for (const QModelIndex &idx : indexes) {
+            if (!idx.isValid())
+                continue;
+            const QString p = filePath(idx);
+            if (!p.isEmpty())
+                urls.append(QUrl::fromLocalFile(p));
+        }
+        if (!urls.isEmpty())
+            md->setUrls(urls);
+        return md;
+    }
+
+    Qt::DropActions supportedDragActions() const override
+    {
+        return Qt::CopyAction | Qt::MoveAction;
+    }
+
+    /* Dropping is negotiated as a copy no matter what the source proposes
+     * (the view default is CopyAction anyway); Move is still advertised so
+     * drop-capable targets elsewhere do not reject our drags. */
+    Qt::DropActions supportedDropActions() const override
+    {
+        return Qt::CopyAction | Qt::MoveAction;
     }
 };
 
@@ -409,7 +552,7 @@ FileList::FileList(QWidget *parent)
     m_treeView->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_treeView->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_treeView->setAlternatingRowColors(false);
-    m_treeView->setAnimated(false);
+    m_treeView->setAnimated(true);   /* expand/collapse glide (3.5.1) */
     m_treeView->setSortingEnabled(true);
     QHeaderView *h = m_treeView->header();
     h->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
@@ -423,6 +566,22 @@ FileList::FileList(QWidget *parent)
 
     m_proxy->setSourceModel(m_model);
     m_proxy->sort(SortName, Qt::AscendingOrder);
+
+    /* Drag & drop both ways (3.5.1). DragDrop = views are drag sources AND
+     * drop targets: XDND carries the selection out to the desktop shell or
+     * any other drop-aware program, and files dragged from another Explorer
+     * window (or any XDND source) land in the folder under the cursor as
+     * copies -- see Model::dropMimeData. (xterm itself predates XDND and
+     * cannot receive drops.) */
+    for (QAbstractItemView *v : { (QAbstractItemView *)m_iconView,
+                                  (QAbstractItemView *)m_listView,
+                                  (QAbstractItemView *)m_treeView }) {
+        v->setDragEnabled(true);
+        v->setDragDropMode(QAbstractItemView::DragDrop);
+        v->setAcceptDrops(true);
+        v->setDropIndicatorShown(true);
+        v->setDefaultDropAction(Qt::CopyAction);
+    }
 
     auto wireSelection = [this](QAbstractItemView *v) {
         connect(v->selectionModel(), &QItemSelectionModel::selectionChanged,
@@ -466,6 +625,27 @@ FileList::FileList(QWidget *parent)
                         (QObject *)m_listView, (QObject *)m_listView->viewport(),
                         (QObject *)m_treeView, (QObject *)m_treeView->viewport() })
         o->installEventFilter(this);
+
+    /* Touch input (3.5.1): the file list must respond like Windows 11
+     * Explorer on a tablet -- tap selects, double-tap opens, holding still
+     * for half a second opens the context menu and dragging scrolls the list
+     * under the finger instead of starting a drag-and-drop.  Viewport-level
+     * WA_AcceptTouchEvents so Qt delivers QTouchEvent instead of silently
+     * converting it to mouse clicks. */
+    for (QWidget *vp : { m_iconView->viewport(), m_listView->viewport(),
+                         m_treeView->viewport() })
+        vp->setAttribute(Qt::WA_AcceptTouchEvents, true);
+    m_touchTimer = new QTimer(this);
+    m_touchTimer->setSingleShot(true);
+    m_touchTimer->setInterval(500);
+    connect(m_touchTimer, &QTimer::timeout, this, [this]() {
+        if (m_touchMenuFired || m_touchScrolling || m_menuOpen)
+            return;
+        if (!m_touchActive)
+            return;
+        m_touchMenuFired = true;
+        onContextMenu(m_touchOrigin);          /* same menu as a right-click */
+    });
 
     m_mode = IconView;
     QSettings s(QStringLiteral("ExplorerForLinux"), QStringLiteral("Explorer"));
@@ -853,6 +1033,16 @@ void FileList::openFile(const QString &path)
 
 bool FileList::eventFilter(QObject *obj, QEvent *event)
 {
+    /* Touch state must be tracked even while a menu is up (the finger can
+     * still be down when the long-press menu opens), so handle touch first. */
+    if (event->type() == QEvent::TouchBegin ||
+        event->type() == QEvent::TouchUpdate ||
+        event->type() == QEvent::TouchEnd ||
+        event->type() == QEvent::TouchCancel) {
+        if (isFileView(obj))
+            return handleTouchEvent(obj, static_cast<QTouchEvent *>(event));
+        return QWidget::eventFilter(obj, event);
+    }
     if (m_menuOpen)
         return QWidget::eventFilter(obj, event);  /* one menu per gesture */
     if (isFileView(obj) && event->type() == QEvent::ContextMenu) {
@@ -872,6 +1062,116 @@ bool FileList::eventFilter(QObject *obj, QEvent *event)
         return true;
     }
     return QWidget::eventFilter(obj, event);
+}
+
+/* One-finger gesture driver for the three file views.  Qt on X11 hands us
+ * QTouchEvent only when the viewport opted in; without it a long-press is
+ * just a press/release pair and there is no way to tell a finger from a
+ * mouse, so Windows-11-style tablet gestures were impossible.
+ *   - finger down  -> arm the 500 ms long-press timer;
+ *   - finger moves past the threshold -> scroll the view under the finger
+ *     (and cancel the timer: a swipe is not a long-press);
+ *   - finger up without moving -> select the item, second tap opens it;
+ *   - finger held still -> the context menu, identical to a right-click. */
+bool FileList::handleTouchEvent(QObject *obj, QTouchEvent *ev)
+{
+    const QEvent::Type t = ev->type();
+    QWidget *w = qobject_cast<QWidget *>(obj);
+    if (!w)
+        return QWidget::eventFilter(obj, ev);
+    auto *sa = qobject_cast<QAbstractScrollArea *>(w);
+    QWidget *vp = sa ? sa->viewport() : w;
+    const auto pts = ev->points();
+
+    if (t == QEvent::TouchCancel) {
+        touchReset();
+        ev->accept();
+        return true;
+    }
+
+    if (t == QEvent::TouchBegin) {
+        if (pts.isEmpty()) { ev->accept(); return true; }
+        touchReset();
+        m_touchActive = true;
+        m_touchOrigin = vp->mapFromGlobal(pts.first().globalPosition().toPoint());
+        m_touchLast = m_touchOrigin;
+        m_touchTimer->start();
+        ev->accept();
+        return true;
+    }
+
+    if (pts.isEmpty()) {
+        ev->accept();
+        return true;
+    }
+    const QPoint p = vp->mapFromGlobal(pts.first().globalPosition().toPoint());
+    const QPoint delta = p - m_touchLast;
+    const QPoint total = p - m_touchOrigin;
+
+    if (t == QEvent::TouchUpdate) {
+        if (!m_touchScrolling &&
+            (qAbs(total.x()) > 8 || qAbs(total.y()) > 8)) {
+            m_touchScrolling = true;      /* a swipe: kill the long-press */
+            m_touchTimer->stop();
+        }
+        if (m_touchScrolling) {
+            if (auto *sa2 = qobject_cast<QAbstractScrollArea *>(
+                    currentViewWidget())) {
+                if (QScrollBar *vsb = sa2->verticalScrollBar())
+                    vsb->setValue(vsb->value() - delta.y());
+                if (QScrollBar *hsb = sa2->horizontalScrollBar())
+                    hsb->setValue(hsb->value() - delta.x());
+            }
+        }
+        m_touchLast = p;
+        ev->accept();
+        return true;
+    }
+
+    /* TouchEnd */
+    m_touchTimer->stop();
+    const bool scrolled = m_touchScrolling;
+    const bool menuFired = m_touchMenuFired;
+    const bool wasActive = m_touchActive;
+    touchReset();
+    ev->accept();
+    if (scrolled || menuFired || !wasActive)
+        return true;
+    /* plain tap: select, second tap within 400 ms opens */
+    const QModelIndex idx = currentIndexAt(p);
+    QAbstractItemView *v = currentView();
+    if (!idx.isValid()) {
+        if (v && v->selectionModel())
+            v->selectionModel()->clearSelection();
+        m_tapTimeMs = 0;
+        m_tapIndex = QModelIndex();
+        return true;
+    }
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (v && v->selectionModel()) {
+        v->selectionModel()->clearSelection();
+        v->selectionModel()->select(idx, QItemSelectionModel::Select |
+                                              QItemSelectionModel::Rows);
+        v->setCurrentIndex(idx);
+    }
+    if (now - m_tapTimeMs < 400 && m_tapIndex == idx) {
+        m_tapTimeMs = 0;
+        m_tapIndex = QModelIndex();
+        onOpenIndex(idx);
+    } else {
+        m_tapTimeMs = now;
+        m_tapIndex = idx;
+    }
+    return true;
+}
+
+void FileList::touchReset()
+{
+    if (m_touchTimer)
+        m_touchTimer->stop();
+    m_touchActive = false;
+    m_touchScrolling = false;
+    m_touchMenuFired = false;
 }
 
 /* pos may be relative to a view OR to its viewport; normalize it to viewport

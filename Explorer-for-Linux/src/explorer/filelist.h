@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QModelIndex>
+#include <QPoint>
 #include <QString>
 #include <QStringList>
 #include <QWidget>
@@ -90,6 +91,10 @@ private:
     void onContextMenuFrom(QWidget *src, const QPoint &pos);
     void setSort(SortColumn column, Qt::SortOrder order);
     void updateStatus();
+    /* touch input (3.5.1): long-press = context menu, tap = select,
+       double-tap = open, drag = scroll the list under the finger */
+    bool handleTouchEvent(QObject *obj, class QTouchEvent *ev);
+    void touchReset();
 
     class Model;
     class ModelProxy;
@@ -107,4 +112,13 @@ private:
     Qt::SortOrder m_sortOrder = Qt::AscendingOrder;
     bool m_showHidden = false;
     bool m_menuOpen = false;
+    /* one-finger gesture state shared by the three views */
+    class QTimer *m_touchTimer = nullptr;
+    QPoint m_touchOrigin;      /* viewport coords where the finger landed */
+    QPoint m_touchLast;        /* last reported position                  */
+    bool m_touchScrolling = false;
+    bool m_touchMenuFired = false;
+    bool m_touchActive = false;
+    qint64 m_tapTimeMs = 0;    /* timestamp of the previous tap           */
+    QModelIndex m_tapIndex;    /* item of the previous tap                */
 };
